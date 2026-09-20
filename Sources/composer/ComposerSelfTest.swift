@@ -12,6 +12,15 @@ import WebKit
 private var failures: [String] = []
 private var checks = 0
 
+/// Probe views must stay alive until their load callbacks fire. Keeping them in an array is explicit
+/// (an associated-object key on NSApp both warns and leaks every view it pins).
+private var liveProbes: [ProbeWebView] = []
+
+private func keepAlive(_ view: ProbeWebView) {
+    liveProbes.append(view)
+    if liveProbes.count > 24 { liveProbes.removeFirst(liveProbes.count - 24) }
+}
+
 private func check(_ ok: Bool, _ label: String) {
     checks += 1
     print(ok ? "  ok    \(label)" : "  FAIL  \(label)")
@@ -31,8 +40,7 @@ private func probePage(_ page: URL, query: String?, completion: @escaping ([Stri
         completion(json, "")
     }
     view.load(page: page)
-    // keep it alive for the duration of the load
-    objc_setAssociatedObject(NSApp, Unmanaged.passUnretained(view).toOpaque(), view, .OBJC_ASSOCIATION_RETAIN)
+    keepAlive(view)
 }
 
 private func snapshot(_ page: URL, query: String?, completion: @escaping (NSBitmapImageRep?) -> Void) {
@@ -49,7 +57,7 @@ private func snapshot(_ page: URL, query: String?, completion: @escaping (NSBitm
         }
     }
     view.load(page: page)
-    objc_setAssociatedObject(NSApp, Unmanaged.passUnretained(view).toOpaque(), view, .OBJC_ASSOCIATION_RETAIN)
+    keepAlive(view)
 }
 
 /// min/max luminance over a coarse grid — enough to tell "the sky rendered" from "a black rectangle"
@@ -174,7 +182,7 @@ func runComposerSelfTest() {
 
         var positionsAtZero: [String: Int] = [:]
         var cloudsSeenSomewhere = false
-        var moments = ["t=0", "t=150", "t=300", "t=450"]
+        let moments = ["t=0", "t=150", "t=300", "t=450"]
         var momentIndex = 0
 
         // the wallpaper documents how it was made; the harness replays the engine's maths from that plan
@@ -471,7 +479,7 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
             }
         }
         view.load(page: page)
-        objc_setAssociatedObject(NSApp, Unmanaged.passUnretained(view).toOpaque(), view, .OBJC_ASSOCIATION_RETAIN)
+        keepAlive(view)
         DispatchQueue.main.asyncAfter(deadline: .now() + 25) { print("timed out"); exit(3) }
     }
 }
