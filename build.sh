@@ -145,9 +145,13 @@ swiftc -O -o "$COMPOSER_MACOS/$COMPOSER_NAME" \
   Sources/composer/ComposerModel.swift \
   Sources/composer/ComposerPreview.swift \
   Sources/composer/ComposerUI.swift \
+  Sources/composer/ComposerLockScreen.swift \
   Sources/composer/ComposerSelfTest.swift
 echo "    app binary: $(ls -l "$COMPOSER_MACOS/$COMPOSER_NAME" | awk '{print $5}') bytes"
-cp -f tools/starbound_mainmenu.py tools/starbound_unpack.py "$COMPOSER_RESOURCES/"
+cp -f tools/starbound_mainmenu.py tools/starbound_unpack.py tools/lockscreen.py "$COMPOSER_RESOURCES/"
+cp -f "$BUILD_DIR/rendertitle" "$BUILD_DIR/probe_video" "$COMPOSER_RESOURCES/"
+#   the Lock Screen renderer, and the video probe lockscreen.py looks for NEXT TO ITSELF when the
+#   ../build copy is not there (which is exactly the case inside an app bundle)
 cp -f "$BUILD_DIR/composite_pngs" "$COMPOSER_RESOURCES/"       # prebuilt: nothing is compiled at runtime
 echo "    bundled tools: $(ls "$COMPOSER_RESOURCES" | tr '\n' ' ')"
 

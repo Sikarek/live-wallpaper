@@ -100,6 +100,11 @@ if arguments.contains("--probe") {
     app.delegate = delegate
     app.setActivationPolicy(.prohibited)
     app.run()
+} else if arguments.contains("--slot-status") {
+    // debug: what does the app see in the Lock Screen slot right now?
+    let composer = Composer()
+    print(composer.lockScreenStatus())
+    exit(0)
 } else if arguments.contains("--dump-a11y") {
     // debug: build the real window and print every control (no screenshot permission needed)
     let delegate = DumpA11yDelegate()

@@ -82,6 +82,23 @@ DISC_BIOMES = ["alien", "arctic", "barren", "desert", "forest", "garden", "jungl
                "moon", "ocean", "savannah", "scorchedcity", "snow", "toxic", "tundra", "volcanic"]
 LIQUIDS = ["water", "lava", "poison", "swampwater", "tarliquid", "tentaclejuice"]
 
+# Gas giants: no horizon art exists (the game never lands you on one), so they only ever appear as a
+# body in the sky. celestial.config gasGiantGraphics + planetaryTypes/GasGiant:
+#   baseImage  -> gas_giant_base.png, hue-shifted by primaryHueShiftRange [0,360]  <- one texture,
+#                 any colour, which is why gas giants in the game come in blue/orange/purple
+#   2 overlays -> gas_giant_clouds_<i>.png, each hue-shifted another +-10 and clipped to one of 30
+#                 dynamics masks, then shadows/<num>.png (shadowNumber [1,9]) on top
+#   imageScale 0.16 / 0.18 / 0.20 (the variationParameters)
+GAS_GIANT = "/celestial/system/gas_giant"
+GAS_BASE = "gas_giant_base.png"
+GAS_CLOUDS = ["gas_giant_clouds_0.png", "gas_giant_clouds_1.png"]
+GAS_DYNAMICS_RANGE = (1, 30)
+GAS_HUE_OFFSET = (-10.0, 10.0)
+GAS_IMAGE_SCALE = 0.18
+GAS_GIANT_TYPE = "gasgiant"          # the name the Composer offers; not a biome you can stand on
+SKY_TYPES = DISC_BIOMES + [GAS_GIANT_TYPE]
+IMAGE_SCALES = {**{"default": DEFAULT_IMAGE_SCALE}, GAS_GIANT_TYPE: GAS_IMAGE_SCALE, **IMAGE_SCALE}
+
 HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -555,7 +572,7 @@ def main():
                          "(default: picked from the seed)")
     ap.add_argument("--parent-planet", default="none",
                     help="draw the planet you orbit in the sky (the engine does this when the world "
-                         "is a moon): any biome name, or none")
+                         "is a moon): any biome name, " + GAS_GIANT_TYPE + ", or none")
     ap.add_argument("--moon-size", type=float, default=1.0,
                     help="multiplier on the engine's moonScale (scene units, default 1.0)")
     ap.add_argument("--planet-size", type=float, default=1.0,
@@ -580,8 +597,11 @@ def main():
                               "alien": [3, 3], "volcanic": [3, 3], "scorchedcity": [2, 3], "toxic": [2, 2],
                               "ocean": [1, 2], "arctic": [1, 2], "magma": [1, 2]},
             "shadows": list(range(1, SHADOW_NUMBERS + 1)),
+            "skyTypes": SKY_TYPES,
+            "gasGiant": {"typeName": GAS_GIANT_TYPE, "imageScale": GAS_IMAGE_SCALE,
+                         "overlays": len(GAS_CLOUDS), "dynamicsRange": list(GAS_DYNAMICS_RANGE)},
             "moonScale": MOON_SCALE, "planetScale": PARENT_SCALE,
-            "imageScale": {**{"default": DEFAULT_IMAGE_SCALE}, **IMAGE_SCALE},
+            "imageScale": IMAGE_SCALES,
             "satelliteArea": list(SATELLITE_AREA),
             "defaults": {"planet": "garden", "masks": [int(m) for m in DEFAULT_MASKS], "maskAlpha": 0.18,
                          "dayLength": 600.0, "cloudAlpha": 3.0, "starsPerCell": STAR_CELL_COUNT,
@@ -601,31 +621,51 @@ def main():
     rng = _random.Random(args.seed)
     orbiters = []
     if args.parent_planet and args.parent_planet != "none":
-        if args.parent_planet not in DISC_BIOMES:
-            sys.exit(f"unknown --parent-planet {args.parent_planet!r}; pick one of: {', '.join(DISC_BIOMES)}")
+        if args.parent_planet not in SKY_TYPES:
+            sys.exit(f"unknown --parent-planet {args.parent_planet!r}; pick one of: {', '.join(SKY_TYPES)}")
         orbiters.append({"type": args.parent_planet, "scale": round(PARENT_SCALE * args.planet_size, 4),
-                         "parent": True})
+                         "parent": True, "kind": "gas" if args.parent_planet == GAS_GIANT_TYPE else "disc"})
     moon_types = [t.strip() for t in args.moon_types.split(",") if t.strip()]
     for i in range(args.moons):
         t = moon_types[i] if i < len(moon_types) else rng.choice(DISC_BIOMES)
         if t not in DISC_BIOMES:
             sys.exit(f"unknown moon type {t!r}; pick one of: {', '.join(DISC_BIOMES)}")
-        orbiters.append({"type": t, "scale": round(MOON_SCALE * args.moon_size, 4), "parent": False})
+        orbiters.append({"type": t, "scale": round(MOON_SCALE * args.moon_size, 4), "parent": False,
+                         "kind": "disc"})
     disc_sources = []          # (pak path, local path) pairs for the compositor's inputs
     for i, orbiter in enumerate(orbiters):
         orbiter["x"] = round(rng.random(), 6)          # unit random x satellite.area, like the engine
         orbiter["y"] = round(rng.random(), 6)
         orbiter["image"] = f"disc{i}.png"
-        shadow = args.disc_shadow or rng.randint(1, SHADOW_NUMBERS)
+        orbiter["shadow"] = args.disc_shadow or rng.randint(1, SHADOW_NUMBERS)
         stack = []
-        if liquid:
-            stack.append(f"{DISC_LIQUID_DIR}/{liquid}.png")
-        for n in range(BASE_COUNT.get(orbiter["type"], 3), 0, -1):
-            stack.append(f"{DISC_DIR}/{orbiter['type']}/maskie{n}.png")
-        stack.append(f"{DISC_SHADOW_DIR}/{shadow}.png")
-        orbiter["stack"] = [os.path.join(f"discsrc{i}", os.path.basename(p)) for p in stack]
-        for p, local in zip(stack, orbiter["stack"]):
-            disc_sources.append((p, local))
+        if orbiter["kind"] == "gas":
+            # the engine's GasGiant branch: base at a random hue, then each cloud overlay hue-shifted a
+            # little further and clipped to its own dynamics mask, then the shadow sprite
+            hue = round(rng.uniform(0, 360), 2)
+            orbiter["gas"] = {"hue": hue, "overlays": []}
+            stack.append((f"{GAS_GIANT}/{GAS_BASE}", hue, None, None))
+            for cloud in GAS_CLOUDS:
+                hue = round(hue + rng.uniform(*GAS_HUE_OFFSET), 2)
+                dynamics = rng.randint(*GAS_DYNAMICS_RANGE)
+                stack.append((f"{GAS_GIANT}/{cloud}", hue, f"{GAS_GIANT}/gas_giant_dynamics/{dynamics}.png",
+                              dynamics))
+                orbiter["gas"]["overlays"].append({"image": cloud, "hue": hue, "dynamics": dynamics})
+            shadow_path = f"{GAS_GIANT}/shadows/{orbiter['shadow']}.png"
+            orbiter["shadow_path"] = shadow_path
+            stack.append((shadow_path, 0, None, None))
+        else:
+            if liquid:
+                stack.append((f"{DISC_LIQUID_DIR}/{liquid}.png", 0, None, None))
+            for n in range(BASE_COUNT.get(orbiter["type"], 3), 0, -1):
+                stack.append((f"{DISC_DIR}/{orbiter['type']}/maskie{n}.png", 0, None, None))
+            orbiter["shadow_path"] = f"{DISC_SHADOW_DIR}/{orbiter['shadow']}.png"
+            stack.append((orbiter["shadow_path"], 0, None, None))
+        orbiter["stack"] = stack
+        for pak_path, _, mask_path, _ in stack:
+            disc_sources.append((pak_path, os.path.join(f"discsrc{i}", os.path.basename(pak_path))))
+            if mask_path:
+                disc_sources.append((mask_path, os.path.join(f"discsrc{i}", "dyn_" + os.path.basename(mask_path))))
 
     wanted = [
         (f"{HORIZON}/textures/{args.planet}_l.png", f"{args.planet}_l.png"),
@@ -713,11 +753,39 @@ def main():
 
     # Composite each sky body the way drawWorld() stacks it: the disc art <baseCount>..1, then the
     # shadow sprite on top. All layers are the same 542x542 texture, so they draw at the same rect.
-    for orbiter in orbiters:
-        size = png_size(os.path.join(assets, orbiter["stack"][0]))
-        cmd = [compositor, os.path.join(assets, orbiter["image"]), str(size[0]), str(size[1]),
-               "--stack"] + orbiter["stack"]
-        print("  " + subprocess.run(cmd, capture_output=True, text=True, cwd=assets).stdout.strip())
+    def run_compositor(args):
+        result = subprocess.run([compositor] + args, capture_output=True, text=True, cwd=assets)
+        print("  " + result.stdout.strip())
+
+    for index, orbiter in enumerate(orbiters):
+        inside = f"discsrc{index}"
+        if orbiter["kind"] == "gas":
+            # GasGiant branch of drawWorld(): base at its hue, then each overlay hue-shifted further and
+            # clipped to its own dynamics mask, then the shadow sprite.
+            base = os.path.join(inside, GAS_BASE)
+            size = png_size(os.path.join(assets, base))
+            plates = []
+            for n, overlay in enumerate(orbiter["gas"]["overlays"]):
+                tinted, plate = f"gas-tint{n}.png", f"gas-plate{n}.png"
+                run_compositor([tinted, str(size[0]), str(size[1]), "--hue", str(overlay["hue"]),
+                                "--over", os.path.join(inside, overlay["image"])])
+                run_compositor([plate, str(size[0]), str(size[1]),
+                                "--over", os.path.join(inside, f"dyn_{overlay['dynamics']}.png"),
+                                "--atop", "1.0", tinted])
+                plates.append(plate)
+            cmd = [os.path.join(assets, orbiter["image"]), str(size[0]), str(size[1]),
+                   "--hue", str(orbiter["gas"]["hue"]), "--over", base]
+            for plate in plates:
+                cmd += ["--over", plate]
+            cmd += ["--over", os.path.join(inside, os.path.basename(orbiter["shadow_path"]))]
+            run_compositor(cmd)
+        else:
+            # the stack entries are (pak path, hue, mask path, dynamics); their extracted names live in
+            # discsrc<i>/ under the pak basename
+            locals_ = [os.path.join(inside, os.path.basename(pak_path)) for pak_path, _, _, _ in orbiter["stack"]]
+            size = png_size(os.path.join(assets, locals_[0]))
+            run_compositor([os.path.join(assets, orbiter["image"]), str(size[0]), str(size[1]),
+                            "--stack"] + locals_)
 
     html = (HTML
             .replace("__DAYLENGTH__", str(args.day_length))
@@ -742,7 +810,7 @@ def main():
             .replace("__ORBITERS__", _json.dumps([{"x": o["x"], "y": o["y"], "type": o["type"],
                                                    "scale": o["scale"]} for o in orbiters]))
             .replace("__AREA_W__", str(SATELLITE_AREA[0])).replace("__AREA_H__", str(SATELLITE_AREA[1]))
-            .replace("__IMAGE_SCALES__", _json.dumps({**{"default": DEFAULT_IMAGE_SCALE}, **IMAGE_SCALE}))
+            .replace("__IMAGE_SCALES__", _json.dumps(IMAGE_SCALES))
             .replace("__HUE_SHIFT__", str(args.hue_shift))
             .replace("__ORBITER_FILES__", repr([o["image"] for o in orbiters]))
             .replace("__CLOUD_FILES__", repr([f"{c}.png" for c in CLOUD_SHEETS]))
@@ -756,15 +824,19 @@ def main():
     # it is what tells you (months later) which moons and which masks produced a look you liked.
     plan = {
         "generator": "starbound_mainmenu.py",
-        "planet": args.planet, "masks": masks, "maskAlpha": args.mask_alpha, "shade": bool(args.shade),
+        "planet": args.planet, "masks": [int(m) for m in masks], "maskAlpha": args.mask_alpha,
+        "shade": bool(args.shade),
         "liquid": liquid, "hueShift": args.hue_shift, "dayLength": args.day_length,
         "cloudAlpha": args.cloud_alpha, "starsPerCell": args.stars_per_cell, "seed": args.seed,
         "interfaceScale": args.interface_scale,
-        "engine": {"satelliteArea": list(SATELLITE_AREA), "moonScale": args.moon_size * MOON_SCALE,
-                   "planetScale": args.planet_size * PARENT_SCALE,
-                   "imageScale": {**{"default": DEFAULT_IMAGE_SCALE}, **IMAGE_SCALE}},
+        "moonSize": args.moon_size, "planetSize": args.planet_size, "discShadow": args.disc_shadow,
+        "engine": {"satelliteArea": list(SATELLITE_AREA), "moonScale": MOON_SCALE,
+                   "planetScale": PARENT_SCALE,
+                   "imageScale": IMAGE_SCALES},
         "orbiters": [{"x": o["x"], "y": o["y"], "type": o["type"], "scale": o["scale"],
-                      "image": o["image"]} for o in orbiters],
+                      "image": o["image"], "kind": o.get("kind", "disc"),
+                      "shadow": o.get("shadow"), "gas": o.get("gas"),
+                      "parent": o.get("parent", False)} for o in orbiters],
     }
     with open(os.path.join(out, "backdrop.json"), "w") as g:
         _json.dump(plan, g, indent=2)

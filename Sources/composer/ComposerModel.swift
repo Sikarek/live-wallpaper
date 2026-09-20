@@ -20,8 +20,10 @@ struct Palette: Decodable {
         let seed: Int
     }
     let planets: [String]
+    let skyTypes: [String]?
     let liquids: [String]
     let masks: [Int]
+    let maskPerPlanet: [String: [Int]]?
     let shadows: [Int]
     let moonScale: Double
     let planetScale: Double
@@ -42,6 +44,23 @@ enum Tools {
         return FileManager.default.fileExists(atPath: inRepo.path) ? inRepo : nil
     }
 
+    /// rendertitle makes the Lock Screen clip from the same plan; it is bundled for the same reason.
+    static var renderTitle: URL? {
+        let bundled = resourcesDir?.appendingPathComponent("tools/rendertitle")
+        if let bundled, FileManager.default.fileExists(atPath: bundled.path) { return bundled }
+        let inRepo = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Projects/live-wallpaper/build/rendertitle")
+        return FileManager.default.fileExists(atPath: inRepo.path) ? inRepo : nil
+    }
+
+    static var lockscreenTool: URL? {
+        let bundled = resourcesDir?.appendingPathComponent("tools/lockscreen.py")
+        if let bundled, FileManager.default.fileExists(atPath: bundled.path) { return bundled }
+        let inRepo = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Projects/live-wallpaper/tools/lockscreen.py")
+        return FileManager.default.fileExists(atPath: inRepo.path) ? inRepo : nil
+    }
+
     static var compositor: URL? {
         let bundled = resourcesDir?.appendingPathComponent("tools/composite_pngs")
         if let bundled, FileManager.default.fileExists(atPath: bundled.path) { return bundled }
@@ -52,10 +71,51 @@ enum Tools {
 
     static let python = "/usr/bin/python3"
 
+    /// Run a long tool and hand each output line to `onLine` as it arrives (renders report progress).
+    static func runStreaming(executable: URL, arguments: [String], onLine: @escaping (String) -> Void) {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+        if let compositor { environment["LW_COMPOSITOR"] = compositor.path }
+        process.environment = environment
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do { try process.run() } catch { return }
+        let handle = pipe.fileHandleForReading
+        var buffer = Data()
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+            while let newline = buffer.firstIndex(of: 0x0A) {
+                let lineData = buffer[..<newline]
+                buffer.removeSubrange(...newline)
+                if let line = String(data: lineData, encoding: .utf8) { onLine(line) }
+            }
+        }
+        process.waitUntilExit()
+    }
+
+    /// Run one of the bundled tools and return its output. `run(arguments:)` runs the generator; this
+    /// takes the script explicitly — without it, calling any *other* tool silently ran the generator
+    /// with that path as an argument and the caller parsed argparse's usage text.
+    @discardableResult
+    static func run(_ script: URL, arguments: [String], timeout: TimeInterval = 300) -> (out: String, code: Int32)? {
+        runProcess(script, arguments: arguments, timeout: timeout)
+    }
+
     /// Run the generator, returning stdout (nil on failure — the caller shows `lastError`).
     @discardableResult
     static func run(arguments: [String], timeout: TimeInterval = 300) -> (out: String, code: Int32)? {
         guard let script else { return nil }
+        return runProcess(script, arguments: arguments, timeout: timeout)
+    }
+
+    private static func runProcess(_ script: URL, arguments: [String],
+                                   timeout: TimeInterval) -> (out: String, code: Int32)? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = [script.path] + arguments
@@ -73,6 +133,18 @@ enum Tools {
         if process.isRunning { process.terminate(); return ("timeout", -1) }
         let text = String(data: data, encoding: .utf8) ?? ""
         return (text, process.terminationStatus)
+    }
+
+    /// A one-line summary a person can read: what is in the slot and whether it matches.
+    static func slotStatusLine(_ raw: String) -> String {
+        let lines = raw.split(separator: "\n").map(String.init)
+        let duration = lines.first { $0.contains("duration") }.flatMap { line -> String? in
+            let parts = line.split(separator: " ")
+            guard let index = parts.firstIndex(where: { $0 == "duration" }), index + 1 < parts.count else { return nil }
+            return String(parts[index + 1])
+        } ?? "?"
+        let verdict = lines.first { $0.contains("MATCHED") || $0.contains("MISMATCH") } ?? ""
+        return "slot video \(duration)s \u{2022} " + verdict.trimmingCharacters(in: .whitespaces)
     }
 }
 
@@ -109,6 +181,9 @@ final class Composer: ObservableObject {
 
     // state
     @Published var status = "ready"
+    @Published var savedWallpaper = ""
+    @Published var savedList: [String] = []
+    @Published var slotStatus = "reading the Lock Screen slot…"
     @Published var probe = ""
     @Published var busy = false
     @Published var previewURL: URL?
@@ -141,7 +216,8 @@ final class Composer: ObservableObject {
     var scratchPlanet: String { palette?.planets.first ?? "garden" }
     var planetChoices: [String] { palette?.planets ?? [] }
     var liquidChoices: [String] { ["none"] + (palette?.liquids ?? []) }
-    var worldChoices: [String] { ["none"] + (palette?.planets ?? []) }
+    /// the planet you orbit can be a gas giant, which is why this list is not just the biomes
+    var worldChoices: [String] { ["none"] + (palette?.skyTypes ?? palette?.planets ?? []) }
 
     /// Every knob as the generator's command line. Both the preview and the export go through this.
     var generatorArguments: [String] {
@@ -151,7 +227,7 @@ final class Composer: ObservableObject {
         args += ["--liquid", liquid]
         args += ["--hue-shift", String(format: "%.1f", hueShift)]
         args += ["--cloud-alpha", String(format: "%.2f", cloudAlpha)]
-        args += ["--day-length", String(format: "%.1f", dayLength)]
+        args += ["--day-length", String(Int(dayLength.rounded()))]   // whole seconds: the video must match
         args += ["--stars-per-cell", String(starsPerCell)]
         args += ["--moons", String(moons)]
         args += ["--moon-types", Array(moonTypes.prefix(moons)).joined(separator: ",")]
@@ -187,6 +263,18 @@ final class Composer: ObservableObject {
     /// Writes the current combination into a FRESH folder and hands it to the preview. A new folder each
     /// time is what makes WebKit actually re-read the page and its images: same-URL file:// content is
     /// served from its cache, which is the other half of "the preview never changes".
+    func refreshSavedList() {
+        savedList = Self.savedWallpapers()
+        if !savedList.contains(savedWallpaper) { savedWallpaper = savedList.first ?? "" }
+    }
+
+    func refreshSlotStatus() {
+        DispatchQueue.global(qos: .utility).async {
+            let text = self.lockScreenStatus()
+            DispatchQueue.main.async { self.slotStatus = text }
+        }
+    }
+
     func refreshPreview() {
         guard toolsOK else { status = "tools not found — run build.sh to bundle them"; return }
         pendingPreview?.cancel()
@@ -226,12 +314,32 @@ final class Composer: ObservableObject {
         }
     }
 
+    /// Randomise the three mask numbers. The count follows the biome's own maskPerPlanetRange
+    /// (garden 3, scorchedcity 2-3, ocean 1-2, ...) — the rule the engine uses to decide how many
+    /// surface masks a world gets — and the numbers are distinct, as the engine draws them per planet.
+    func randomMasks() {
+        let rule = palette?.maskPerPlanet?[planet] ?? [1, 3]
+        let low = rule.first ?? 1, high = rule.count > 1 ? rule[1] : low
+        let count = Int.random(in: low...max(low, high))
+        let pool = palette?.masks ?? Array(1...25)
+        var picked: [Int] = []
+        var guardCount = 0
+        while picked.count < count && guardCount < 200 {
+            guardCount += 1
+            if let candidate = pool.randomElement(), !picked.contains(candidate) { picked.append(candidate) }
+        }
+        masks = picked + Array(repeating: 0, count: max(0, 3 - picked.count))
+        schedulePreview()
+    }
+
     func randomize() {
         guard let palette else { return }
         seed = Int.random(in: 1...9_999_999)
         planet = palette.planets.randomElement() ?? "garden"
         liquid = Bool.random() ? "none" : (palette.liquids.randomElement() ?? "none")
-        let count = Int.random(in: 1...3)
+        let rule = palette.maskPerPlanet?[planet] ?? [1, 3]
+        let low = rule.first ?? 1, high = rule.count > 1 ? rule[1] : low
+        let count = Int.random(in: low...max(low, high))
         masks = (0..<3).map { $0 < count ? Int.random(in: 1...25) : 0 }
         hueShift = Double(Int.random(in: -180...180))
         moons = Int.random(in: 0...3)
@@ -241,6 +349,80 @@ final class Composer: ObservableObject {
         planetSize = Double.random(in: 0.7...1.6)
         discShadow = Int.random(in: 0...9)
         cloudAlpha = Double.random(in: 1.5...4.5)
+        refreshPreview()
+    }
+
+    // MARK: - branch off a wallpaper that already exists
+
+    /// backdrop.json has been written by two versions of the generator; one of them stored mask numbers
+    /// as strings. Decode either, or a wallpaper you already have would refuse to load.
+    enum FlexibleInt: Decodable {
+        case value(Int)
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let number = try? container.decode(Int.self) { self = .value(number); return }
+            if let number = try? container.decode(Double.self) { self = .value(Int(number)); return }
+            if let text = try? container.decode(String.self), let number = Int(text) {
+                self = .value(number); return
+            }
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "expected a mask number")
+        }
+    }
+
+    struct SavedPlan: Decodable {
+        struct Orbiter: Decodable { let type: String; let parent: Bool? }
+        let planet: String
+        let masks: [FlexibleInt]?
+        let maskAlpha: Double?
+        let liquid: String?
+        let hueShift: Double?
+        let cloudAlpha: Double?
+        let starsPerCell: Int?
+        let dayLength: Double?
+        let seed: Int?
+        let moonSize: Double?
+        let planetSize: Double?
+        let discShadow: Int?
+        let orbiters: [Orbiter]?
+    }
+
+    /// Wallpapers in the library that carry a plan, newest name first — these are the ones this app
+    /// (or the CLI) produced, so every knob can be restored exactly.
+    static func savedWallpapers() -> [String] {
+        let manager = FileManager.default
+        guard let entries = try? manager.contentsOfDirectory(at: libraryDir, includingPropertiesForKeys: nil) else { return [] }
+        return entries.filter { manager.fileExists(atPath: $0.appendingPathComponent("backdrop.json").path) }
+            .map { $0.lastPathComponent }.sorted()
+    }
+
+    /// Adopt a saved combination so a new idea can start from one that already worked.
+    func load(from folder: URL) {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent("backdrop.json")),
+              let plan = try? JSONDecoder().decode(SavedPlan.self, from: data) else {
+            status = "that wallpaper has no backdrop.json to load"
+            return
+        }
+        name = folder.lastPathComponent
+        savedWallpaper = folder.lastPathComponent
+        planet = plan.planet
+        liquid = plan.liquid ?? "none"
+        let restoredMasks = (plan.masks ?? []).map { if case .value(let number) = $0 { return number } else { return 0 } }
+        masks = restoredMasks + Array(repeating: 0, count: max(0, 3 - restoredMasks.count))
+        if let value = plan.maskAlpha { maskAlpha = value }
+        if let value = plan.hueShift { hueShift = value }
+        if let value = plan.cloudAlpha { cloudAlpha = value }
+        if let value = plan.starsPerCell { starsPerCell = value }
+        if let value = plan.dayLength { dayLength = value.rounded() }
+        if let value = plan.seed { seed = value }
+        if let value = plan.moonSize { moonSize = value }
+        if let value = plan.planetSize { planetSize = value }
+        if let value = plan.discShadow { discShadow = value }
+        let bodies = plan.orbiters ?? []
+        let moons = bodies.filter { ($0.parent ?? false) == false }
+        self.moons = min(3, moons.count)
+        moonTypes = (0..<3).map { index in index < moons.count ? moons[index].type : "moon" }
+        parentPlanet = bodies.first { ($0.parent ?? false) == true }?.type ?? "none"
+        status = "loaded \u{201C}\(folder.lastPathComponent)\u{201D} — change what you like and export a copy"
         refreshPreview()
     }
 

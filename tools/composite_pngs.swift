@@ -14,6 +14,7 @@
 
 import AppKit
 import CoreGraphics
+import CoreImage
 
 let argv = CommandLine.arguments
 var printStats = false
@@ -30,15 +31,28 @@ struct Group {
     var mode: CGBlendMode
     var alpha: CGFloat
     var files: [String]
+    /// degrees of hue rotation applied to this group's files. The engine hue-shifts whole layers
+    /// ("?hueshift="), which is how one gas-giant base texture becomes blue, orange or purple worlds.
+    var hue: Double = 0
     /// true: draw every file at the FULL canvas rect (stacked art, e.g. the 542x542 planet discs);
     /// false: butt the files together horizontally, bottom-aligned (the horizon band's left/right halves).
     var fullCanvas: Bool
 }
 var groups: [Group] = []
+var pendingHue = 0.0
 var index = 4
 while index < arguments.count {
     let flag = arguments[index]
     index += 1
+    // "--hue 45" sets the rotation for the NEXT group (it is an attribute, not a group of its own).
+    // It has to be handled before the alpha/file collection below, or it swallows the next group.
+    if flag == "--hue" {
+        if index < arguments.count, let value = Double(arguments[index]) {
+            pendingHue = value
+            index += 1
+        }
+        continue
+    }
     // an optional alpha may follow the flag: --atop 0.18 mask1.png mask2.png
     var alpha: CGFloat = 1
     if index < arguments.count, let value = Double(arguments[index]), !arguments[index].hasPrefix("--") {
@@ -63,7 +77,22 @@ while index < arguments.count {
         FileHandle.standardError.write("unknown flag \(flag)\n".data(using: .utf8)!)
         exit(2)
     }
-    groups.append(Group(mode: mode, alpha: alpha, files: files, fullCanvas: full))
+    groups.append(Group(mode: mode, alpha: alpha, files: files, hue: pendingHue, fullCanvas: full))
+    pendingHue = 0
+}
+
+/// Hue-rotate an image the way "?hueshift=" does, leaving alpha untouched.
+func hueAdjusted(_ image: CGImage, degrees: Double) -> CGImage {
+    guard degrees != 0 else { return image }
+    guard let filter = CIFilter(name: "CIHueAdjust",
+                                parameters: [kCIInputImageKey: CIImage(cgImage: image),
+                                             kCIInputAngleKey: degrees * Double.pi / 180]),
+          let output = filter.outputImage,
+          let result = CIContext().createCGImage(output, from: output.extent) else {
+        FileHandle.standardError.write("hue filter failed\n".data(using: .utf8)!)
+        exit(1)
+    }
+    return result
 }
 
 func load(_ path: String) -> CGImage {
@@ -85,7 +114,7 @@ for group in groups {
     ctx.setAlpha(group.alpha)
     if group.fullCanvas {
         for file in group.files {
-            let image = load(file)
+            let image = hueAdjusted(load(file), degrees: group.hue)
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: canvasW, height: canvasH))
         }
         continue
@@ -94,7 +123,7 @@ for group in groups {
     let totalWidth = group.files.reduce(0) { $0 + load($1).width }   // pairs butt together
     let startX = (canvasW - totalWidth) / 2
     for file in group.files {
-        let image = load(file)
+        let image = hueAdjusted(load(file), degrees: group.hue)
         // bottom-aligned; CG origin is bottom-left, so y = 0 is the bottom of the output PNG
         ctx.draw(image, in: CGRect(x: startX + x, y: 0, width: image.width, height: image.height))
         x += image.width

@@ -26,6 +26,7 @@
 
 import AVFoundation
 import AppKit
+import CoreImage
 import CoreGraphics
 import Foundation
 import VideoToolbox
@@ -57,6 +58,7 @@ var seed: Int32 = 1234567
 var starsPerCell = 80
 var codec = "hevc"
 var cloudAlpha = 3.0        // matches the HTML wallpaper's --cloud-alpha default
+var secondsGiven = false    // without --seconds the wallpaper's own day length is used
 
 let argv = CommandLine.arguments
 var i = 1
@@ -66,7 +68,7 @@ while i < argv.count {
     case "--height" where i + 1 < argv.count: height = Int(argv[i + 1]) ?? height; i += 2
     case "--fps" where i + 1 < argv.count: fps = Int(argv[i + 1]) ?? fps; i += 2
     case "--encode-fps" where i + 1 < argv.count: encodeFps = Int(argv[i + 1]) ?? encodeFps; i += 2
-    case "--seconds" where i + 1 < argv.count: seconds = Double(argv[i + 1]) ?? seconds; i += 2
+    case "--seconds" where i + 1 < argv.count: seconds = Double(argv[i + 1]) ?? seconds; secondsGiven = true; i += 2
     case "--seed" where i + 1 < argv.count: seed = Int32(argv[i + 1]) ?? seed; i += 2
     case "--stars-per-cell" where i + 1 < argv.count: starsPerCell = Int(argv[i + 1]) ?? starsPerCell; i += 2
     case "--codec" where i + 1 < argv.count: codec = argv[i + 1]; i += 2
@@ -96,6 +98,43 @@ func hash2(_ x: Int, _ y: Int, _ salt: Int) -> Double {
 
 func lerp(_ a: Double, _ b: Double, _ t: Double) -> Double { a + (b - a) * t }
 
+// MARK: - the wallpaper's own plan (read before anything is derived from it)
+
+/// backdrop.json is what the Composer writes next to every wallpaper: reading it means this renderer
+/// produces the SAME scene the desktop is showing — same day length, same star field, same clouds, same
+/// moons — instead of a lookalike that drifts the moment a combination changes.
+struct Plan: Decodable {
+    struct Engine: Decodable { let imageScale: [String: Double]; let satelliteArea: [Double] }
+    struct Orbiter: Decodable { let x: Double; let y: Double; let type: String; let scale: Double }
+    let dayLength: Double
+    let hueShift: Double?
+    let seed: Int?
+    let starsPerCell: Int?
+    let cloudAlpha: Double?
+    let engine: Engine
+    let orbiters: [Orbiter]
+}
+var plan: Plan?
+// backdrop.json sits in the wallpaper folder; the assets dir is usually its "assets" subfolder, so
+// accept both (the Composer passes the wallpaper folder, the wallpaper host passes .../assets).
+let planCandidates = [URL(fileURLWithPath: assetsDir).appendingPathComponent("backdrop.json"),
+                      URL(fileURLWithPath: assetsDir).deletingLastPathComponent()
+                          .appendingPathComponent("backdrop.json")]
+for candidate in planCandidates {
+    if let data = try? Data(contentsOf: candidate) {
+        plan = try? JSONDecoder().decode(Plan.self, from: data)
+        if plan != nil { break }
+    }
+}
+if let plan {
+    if !secondsGiven { seconds = plan.dayLength }        // the lock screen turns at the desktop's rate
+    if let value = plan.seed { seed = Int32(value) }     // …with the desktop's star field
+    if let value = plan.starsPerCell { starsPerCell = value }
+    if let value = plan.cloudAlpha { cloudAlpha = value }
+    print("plan: dayLength \(plan.dayLength)s seed \(seed) stars/cell \(starsPerCell) "
+          + "cloudAlpha \(cloudAlpha) hueShift \(plan.hueShift ?? 0) bodies \(plan.orbiters.count)")
+}
+
 // MARK: - assets
 
 func loadImage(_ path: String) -> CGImage? {
@@ -104,14 +143,41 @@ func loadImage(_ path: String) -> CGImage? {
     return cg
 }
 
-let horizon = loadImage("\(assetsDir)/horizon.png")
-let clouds = CLOUD_SHEETS.compactMap { loadImage("\(assetsDir)/\($0).png") }
-let starSheets = STAR_SHEETS.compactMap { loadImage("\(assetsDir)/stars/\($0)_star.png") }
-guard let planet = horizon, !starSheets.isEmpty else {
-    FileHandle.standardError.write("missing assets in \(assetsDir)\n".data(using: .utf8)!)
+/// Accept either the wallpaper folder or its assets subfolder — callers pass both kinds and the
+/// difference used to show up as "missing assets".
+let assetRoot: String = {
+    let manager = FileManager.default
+    if manager.fileExists(atPath: "\(assetsDir)/horizon.png") { return assetsDir }
+    if manager.fileExists(atPath: "\(assetsDir)/assets/horizon.png") { return "\(assetsDir)/assets" }
+    return assetsDir
+}()
+
+let horizon = loadImage("\(assetRoot)/horizon.png")
+let clouds = CLOUD_SHEETS.compactMap { loadImage("\(assetRoot)/\($0).png") }
+let starSheets = STAR_SHEETS.compactMap { loadImage("\(assetRoot)/stars/\($0)_star.png") }
+let orbiterImages: [CGImage] = (plan?.orbiters ?? []).enumerated().compactMap { index, _ in
+    loadImage("\(assetRoot)/disc\(index).png")
+}
+let imageScales = plan?.engine.imageScale ?? [:]
+let areaX = plan?.engine.satelliteArea.first ?? 400, areaY = plan?.engine.satelliteArea.last ?? 400
+
+guard let planetRaw = horizon, !starSheets.isEmpty else {
+    FileHandle.standardError.write("missing assets in \(assetRoot)\n".data(using: .utf8)!)
     exit(1)
 }
-print("assets: planet \(planet.width)x\(planet.height), \(starSheets.count) star sheets, \(clouds.count) clouds")
+/// the horizon carries the biome's hue shift; CIHueAdjust rotates it the way "?hueshift=" does
+func hueAdjusted(_ image: CGImage, degrees: Double) -> CGImage {
+    guard degrees != 0 else { return image }
+    guard let filter = CIFilter(name: "CIHueAdjust",
+                                parameters: [kCIInputImageKey: CIImage(cgImage: image),
+                                             kCIInputAngleKey: degrees * Double.pi / 180]),
+          let output = filter.outputImage,
+          let result = CIContext().createCGImage(output, from: output.extent) else { return image }
+    return result
+}
+let planet = hueAdjusted(planetRaw, degrees: plan?.hueShift ?? 0)
+print("assets: planet \(planet.width)x\(planet.height), \(starSheets.count) star sheets, \(clouds.count) clouds, "
+      + "\(orbiterImages.count) discs")
 
 // MARK: - layout (StarTitleScreen.cpp ratios)
 
@@ -287,6 +353,25 @@ func drawFrame(context ctx: CGContext, time t: Double) {
                                      width: Double(cropped.width), height: Double(cropped.height)))
     }
     ctx.setShouldAntialias(true)
+
+    // backOrbiters(): moons and the planet you orbit. Same placement as the canvas wallpaper:
+    // (unit random x satellite.area) rotated with the sky about the centre of the BOTTOM edge, drawn
+    // centred, sized texture x imageScale x orbiterScale x pixelRatio.
+    if let plan {
+        for (index, orbiter) in plan.orbiters.enumerated() where index < orbiterImages.count {
+            let image = orbiterImages[index]
+            let dx = orbiter.x * areaX - viewW / 2
+            let dy = orbiter.y * areaY
+            let x = viewW / 2 + dx * cosR - dy * sinR
+            let y = 0 + dx * sinR + dy * cosR
+            let scale = orbiter.scale * (imageScales[orbiter.type] ?? 0.1125) * pixelRatio
+            let ow = Double(image.width) * scale, oh = Double(image.height) * scale
+            let px = x * pixelRatio, py = y * pixelRatio
+            if px + ow / 2 < 0 || px - ow / 2 > Double(width) { continue }
+            if py + oh / 2 < 0 || py - oh / 2 > Double(height) { continue }
+            ctx.draw(image, in: CGRect(x: px - ow / 2, y: py - oh / 2, width: ow, height: oh))
+        }
+    }
 
     // the limb glow the canvas version paints with #glow (radial, screen blend)
     let glowCenter = CGPoint(x: Double(width) / 2, y: 0)

@@ -15,7 +15,11 @@ struct ComposerUI: View {
         }
         .padding(14)
         .frame(minWidth: 1080, minHeight: 680)
-        .onAppear { if composer.previewURL == nil { composer.refreshPreview() } }
+        .onAppear {
+            composer.refreshSavedList()
+            composer.refreshSlotStatus()
+            if composer.previewURL == nil { composer.refreshPreview() }
+        }
         // Every knob change rebuilds the preview (coalesced, so dragging a slider costs one build).
         .onChange(of: composer.signature) { _, _ in composer.schedulePreview() }
     }
@@ -32,10 +36,12 @@ struct ComposerUI: View {
                             .font(.callout).foregroundStyle(.red)
                     }
                 }
+                savedBox
                 planetBox
                 skyBox
                 bodiesBox
                 exportBox
+                lockScreenBox
             }
             .padding(.bottom, 8)
         }
@@ -47,6 +53,48 @@ struct ComposerUI: View {
                 .foregroundStyle(.secondary).font(.callout)
             content()
             Spacer(minLength: 0)
+        }
+    }
+
+    private var savedBox: some View {
+        GroupBox("Start from a saved wallpaper") {
+            VStack(alignment: .leading, spacing: 6) {
+                row("saved") {
+                    Picker("", selection: $composer.savedWallpaper) {
+                        ForEach(composer.savedList, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden().frame(width: 190)
+                    Button("Load") {
+                        composer.load(from: Composer.libraryDir.appendingPathComponent(composer.savedWallpaper))
+                    }.disabled(composer.savedWallpaper.isEmpty)
+                    Button("↻") { composer.refreshSavedList() }.help("rescan the library")
+                }
+                Text("Loads a combination you already exported (every knob comes back from its "
+                     + "backdrop.json), so you can branch off it and export a copy.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private var lockScreenBox: some View {
+        GroupBox("Lock Screen") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(composer.slotStatus).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Render & Install for the Lock Screen") {
+                        composer.renderForLockScreen { composer.refreshSlotStatus() }
+                    }
+                    .disabled(composer.busy)
+                    if composer.busy { ProgressView().controlSize(.small) }
+                    Button("↻") { composer.refreshSlotStatus() }.help("re-read the slot")
+                }
+                Text("The Lock Screen can only play a video, so the combination has to be rendered to one "
+                     + "and installed into Apple's aerial slot. Same plan file, same day length, so the two "
+                     + "sides stay in step. 4K at the wallpaper's day length: minutes, not seconds.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 2)
         }
     }
 
@@ -63,6 +111,9 @@ struct ComposerUI: View {
                         ForEach(composer.liquidChoices, id: \.self) { Text($0).tag($0) }
                     }.labelsHidden().frame(width: 160)
                 }
+                Text("biome = the land, the liquid fills the gaps between the masks. gas giants are in "
+                     + "“parent planet” — the game has no horizon art for them, so they only ever appear in the sky.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 row("masks") {
                     ForEach(0..<3, id: \.self) { i in
                         Picker("", selection: Binding(
@@ -75,8 +126,11 @@ struct ComposerUI: View {
                             })) {
                             Text("none").tag(0)
                             ForEach(composer.palette?.masks ?? [], id: \.self) { Text("\($0)").tag($0) }
-                        }.labelsHidden().frame(width: 66)
+                        }.labelsHidden().frame(width: 58)
                     }
+                    Button("random") { composer.randomMasks() }
+                        .fixedSize()
+                        .help("re-roll the masks for this biome (the count follows the biome's own rule)")
                 }
                 if composer.liquid == "none" {
                     row("mask strength") {
@@ -111,7 +165,7 @@ struct ComposerUI: View {
                     Text("\(composer.starsPerCell)").monospacedDigit().frame(width: 34)
                 }
                 row("day length") {
-                    Slider(value: $composer.dayLength, in: 120...1800)
+                    Slider(value: $composer.dayLength, in: 120...1800, step: 10)
                     Text("\(Int(composer.dayLength)) s").monospacedDigit().frame(width: 58)
                 }
                 Text("A day is one full turn of the sky. 600 s is the game's default; the Lock Screen video "

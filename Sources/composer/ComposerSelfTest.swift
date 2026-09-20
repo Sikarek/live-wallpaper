@@ -227,6 +227,88 @@ func liquidChecks(then done: @escaping () -> Void) {
     }
 }
 
+/// The Composer's own features: loading a saved combination, the mask randomiser, gas giants, and the
+/// Lock Screen hand-off. The load test is a round trip — export, load, export again, compare bytes — so
+/// "branch off a wallpaper I already made" cannot silently lose a knob.
+func composerFeatureChecks(then done: @escaping () -> Void) {
+    print("== 7. the Composer's own features ==")
+    let manager = FileManager.default
+    let first = Composer()
+    check(first.palette != nil, "palette loaded")
+    check((first.palette?.skyTypes ?? []).contains("gasgiant"),
+          "gas giants are offered as sky bodies (skyTypes has \(first.palette?.skyTypes?.count ?? 0) entries)")
+
+    // the mask randomiser follows the biome's own rule
+    first.planet = "garden"
+    first.randomMasks()
+    check(first.masks.filter { $0 > 0 }.count == 3, "garden randomises to its 3 masks (\(first.masks))")
+    check(Set(first.masks.filter { $0 > 0 }).count == first.masks.filter { $0 > 0 }.count, "mask numbers are distinct")
+    first.planet = "ocean"
+    var oceanCounts = Set<Int>()
+    for _ in 0..<12 { first.randomMasks(); oceanCounts.insert(first.masks.filter { $0 > 0 }.count) }
+    check(oceanCounts.isSubset(of: [1, 2]), "ocean randomises to 1-2 masks like the engine (\(oceanCounts.sorted()))")
+    check(oceanCounts.count == 2, "both of the ocean's allowed counts show up over 12 draws")
+
+    // a gas giant parent: export it, then read the plan back
+    let nameA = "selftest-roundtrip-a", nameB = "selftest-roundtrip-b"
+    for name in [nameA, nameB] {
+        try? manager.removeItem(at: Composer.libraryDir.appendingPathComponent(name))
+    }
+    let scene = Composer()
+    scene.name = nameA
+    scene.planet = "forest"; scene.liquid = "water"; scene.masks = [6, 11, 17]
+    scene.moons = 2; scene.moonTypes = ["moon", "barren", "tundra"]
+    scene.parentPlanet = "gasgiant"; scene.seed = 4242; scene.dayLength = 600
+    print("      exporting \(nameA) (forest + water + 2 moons + a gas giant)…")
+    scene.export(useNow: false) {
+        let folderA = Composer.libraryDir.appendingPathComponent(nameA)
+        check(manager.fileExists(atPath: folderA.appendingPathComponent("disc0.png").path) == false,
+              "disc art lives under assets/")
+        let planA = folderA.appendingPathComponent("backdrop.json")
+        if let data = try? Data(contentsOf: planA),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let bodies = json["orbiters"] as? [[String: Any]] {
+            let gassy = bodies.first { ($0["type"] as? String) == "gasgiant" }
+            check(gassy != nil, "the gas giant is in the plan")
+            check((gassy?["kind"] as? String) == "gas", "it is marked as a gas giant")
+            check((gassy?["gas"] as? [String: Any]) != nil, "its hue and cloud overlays are recorded")
+            check(bodies.count == 3, "2 moons + 1 parent planet (\(bodies.count))")
+        } else {
+            check(false, "the plan is readable JSON")
+        }
+
+        // now load it back into a fresh Composer and export a copy
+        let reborn = Composer()
+        reborn.load(from: folderA)
+        check(reborn.planet == "forest", "loaded the biome (got \(reborn.planet))")
+        check(reborn.liquid == "water", "loaded the liquid (got \(reborn.liquid))")
+        check(reborn.masks == [6, 11, 17], "loaded the masks (got \(reborn.masks))")
+        check(reborn.moons == 2, "loaded the moon count (got \(reborn.moons))")
+        check(reborn.parentPlanet == "gasgiant", "loaded the gas giant parent (got \(reborn.parentPlanet))")
+        check(reborn.seed == 4242, "loaded the seed (got \(reborn.seed))")
+        reborn.name = nameB
+        reborn.export(useNow: false) {
+            func bytes(_ folder: String, _ file: String) -> Data? {
+                try? Data(contentsOf: Composer.libraryDir.appendingPathComponent(folder).appendingPathComponent(file))
+            }
+            let pageA = bytes(nameA, "index.html"), pageB = bytes(nameB, "index.html")
+            let horizonA = bytes(nameA, "assets/horizon.png"), horizonB = bytes(nameB, "assets/horizon.png")
+            let discA = bytes(nameA, "assets/disc0.png"), discB = bytes(nameB, "assets/disc0.png")
+            check(pageA != nil && pageA == pageB, "a loaded combination reproduces the same page byte for byte")
+            check(horizonA != nil && horizonA == horizonB, "…the same horizon")
+            check(discA != nil && discA == discB, "…and the same gas giant (same seed, same hue)")
+            for name in [nameA, nameB] {
+                try? manager.removeItem(at: Composer.libraryDir.appendingPathComponent(name))
+            }
+            // the Lock Screen side must at least answer
+            let status = reborn.lockScreenStatus()
+            check(status.contains("slot video") && !status.contains("?s"),
+                  "the Lock Screen slot reports a real duration and verdict (\(status))")
+            done()
+        }
+    }
+}
+
 struct SelfTestCase {
     let name: String
     let arguments: [String]
@@ -434,7 +516,7 @@ func runComposerSelfTest() {
             check((result?.code ?? -1) == 0, "generated a hue-shifted variant")
             snapshot(hueFolder.appendingPathComponent("index.html"), query: "t=60") { b in
                 check(pixelHash(b) != h1, "a 150° hue shift produces different pixels")
-                previewUpdateChecks { liquidChecks { finish() } }
+                previewUpdateChecks { liquidChecks { composerFeatureChecks { finish() } } }
             }
         }
     }

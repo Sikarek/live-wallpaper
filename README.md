@@ -299,9 +299,38 @@ The self-test re-derives each body's position with a second implementation of th
 requires the page to agree exactly, so a slipped sign or a unit mix-up fails the build instead of
 quietly moving a moon.
 
+**Starting from something you already made.** “Start from a saved wallpaper” lists the wallpapers in the
+library that carry a plan; Load restores every knob from its `backdrop.json`, so you can branch off a
+look you liked and export a copy under a new name. A round trip is byte-exact — the same seed, masks,
+liquid and moon set reproduce the same page, horizon and discs — which is what the self-test asserts.
+
+**Masks.** The `random` button re-rolls the three mask numbers following the biome's own
+`maskPerPlanetRange` (garden always 3, scorchedcity 2-3, ocean 1-2, …), the rule the engine uses to
+decide how many surface masks a world gets.
+
+**Gas giants.** They are sky-only worlds — the game has no horizon art for them, because nobody stands
+on one — so they appear in **parent planet**. A gas giant is the engine's stack: a base texture at a
+random hue, two cloud overlays each hue-shifted a little further and clipped to their own dynamics
+mask, then a shadow sprite. One texture, any colour.
+
+**The Lock Screen is a video.** macOS animates only Apple's aerial *video* there, so a combination
+reaches the Lock Screen by being rendered to a file and installed into that slot — there is exactly one
+slot, whatever the desktop is showing. “Render & Install for the Lock Screen” does that from the
+combination's own plan: same day length, same seed, same moons, so the two sides show the same scene.
+`rendertitle` reads `backdrop.json` (day length, seed, star density, cloud alpha, hue, sky bodies), so
+you do not have to keep two sets of numbers in step. Check the result any time with:
+
+```bash
+python3 tools/lockscreen.py --rates     # desktop rate vs the slot's video rate, and a verdict
+```
+
 Everything the window does is scriptable, which is also how it gets tested:
 
 ```bash
+# load a saved combination into the window's controls (same code path as the Load button)
+./build/StarboundComposer.app/Contents/MacOS/StarboundComposer --export my-sky --planet gasgiant-check \
+    --parent-planet gasgiant --moons 2 --seed 4242
+
 # export a combination without opening the window (same code path as the Export button)
 ./build/StarboundComposer.app/Contents/MacOS/StarboundComposer --export my-sky \
     --planet midnight --liquid water --moons 3 --parent-planet ocean --seed 42 --use-now
