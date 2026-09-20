@@ -94,6 +94,17 @@ this machine. Acting on those re-created every window and reloaded every page, w
 desktop picture flashing back to the Mac wallpaper. The app now keys off a *layout signature*
 (display ids + frames + scales) and only rebuilds when the layout genuinely differs.
 
+Two traps worth naming, because both made the wallpaper vanish after a sleep:
+
+- **Only launchd may start the app.** Launching it with `open` as well races the single-instance guard;
+  the extra instance exits instantly, launchd reads those rapid exits as a crash loop and throttles the
+  job — after which nothing restarts the wallpaper. `build.sh --install` therefore installs the agent,
+  kickstarts it, and launches nothing by hand.
+- **Every placeholder in the LaunchAgent plist must be substituted.** An unsubstituted `__LOG__` left
+  `StandardErrorPath` pointing at a path launchd cannot create, so the job sat at
+  `state = spawn scheduled` and never spawned at all. `build.sh` now substitutes all three and fails
+  loudly if any `__` remains.
+
 Related smoothness work: new windows are created before the old ones are retired (no uncovered gap),
 a `ProcessInfo` activity keeps App Nap / automatic termination from suspending the WebKit content,
 terminated content processes reload themselves, the page background is transparent so the window's

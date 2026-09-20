@@ -151,8 +151,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.refreshAerialPipeline(reason: "wake from sleep")
+            // Waking from sleep lands you ON the lock screen: restarting the wallpaper agent here
+            // would take the renderer away from the screen you are looking at. The unlock
+            // notification that follows will do the refresh instead.
+            if Self.screenIsLocked() {
+                NSLog("LIVEWALLPAPER (wake) screen is locked — the aerial is refreshed on unlock instead")
+            } else {
+                self?.refreshAerialPipeline(reason: "wake from sleep")
+            }
+            // and make sure our own windows survived the sleep
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                guard let self else { return }
+                let missing = self.host.slots.contains { !$0.window.isVisible }
+                if missing {
+                    NSLog("LIVEWALLPAPER (wake) \(self.host.slots.filter { !$0.window.isVisible }.count) wallpaper window(s) gone — rebuilding")
+                    self.applyPlan()
+                }
+            }
         }
+    }
+
+    /// Is the screen locked right now? (CGSessionCopyCurrentDictionary is the supported way.)
+    static func screenIsLocked() -> Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        return (session["CGSSessionScreenIsLocked"] as? Bool) ?? false
     }
 
     /// Restart WallpaperAgent (which re-exports the wallpaper and respawns its extension) — only when

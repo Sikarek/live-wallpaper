@@ -19,6 +19,43 @@ MACOS_DIR="$APP/Contents/MacOS"
 
 command -v swiftc >/dev/null || { echo "swiftc not found — install the Xcode Command Line Tools: xcode-select --install"; exit 1; }
 
+# Install (or repair) the per-user LaunchAgent. A silently failed bootstrap is the difference between
+# a wallpaper that comes back after a reboot and one that never returns, so this verifies it.
+install_launch_agent() {
+  local plist="$1"
+  local label
+  label="$(basename "$plist" .plist)"
+  plutil -lint "$plist" >/dev/null || { echo "    INVALID plist: $plist"; return 1; }
+  launchctl enable "gui/$(id -u)/$label" 2>/dev/null || true
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  local attempt
+  for attempt in 1 2 3 4 5; do          # bootstrap can fail with EIO right after a bootout
+    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null && break
+    sleep 1
+  done
+  launchctl kickstart "gui/$(id -u)/$label" 2>/dev/null || true
+  # spawning can be throttled after a crash loop; poll instead of a fixed sleep
+  local waited=0
+  while [ "$waited" -lt 15 ]; do
+    if launchctl print "gui/$(id -u)/$label" 2>/dev/null | grep -q "state = running"; then
+      echo "    login agent: loaded and running ($plist)"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # one more kick, then a final check
+  launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null || true
+  sleep 3
+  if launchctl print "gui/$(id -u)/$label" 2>/dev/null | grep -q "state = running"; then
+    echo "    login agent: loaded and running after a retry ($plist)"
+    return 0
+  fi
+  echo "    WARNING: the login agent is NOT running — the wallpaper would not survive a reboot."
+  echo "             retry:  launchctl bootstrap gui/$(id -u) \"$plist\""
+  return 1
+}
+
 echo "==> building $APP_NAME $VERSION"
 rm -rf "$APP"
 mkdir -p "$MACOS_DIR" "$BUILD_DIR"
@@ -95,14 +132,19 @@ if [ "${1:-}" = "--install" ]; then
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "$DEST/$APP_NAME.app" >/dev/null 2>&1 || true
   sleep 1
-  # `open` can fail in non-GUI shells; launchd is the reliable way to start a menu-bar app
-  if ! open "$DEST/$APP_NAME.app" 2>/dev/null; then
-    PLIST="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
-    mkdir -p "$HOME/Library/LaunchAgents"
-    sed "s|__APP__|$DEST/$APP_NAME.app|g; s|__BUNDLE_ID__|$BUNDLE_ID|g" \
-        support/launchagent.plist > "$PLIST"
-    launchctl bootout "gui/$(id -u)/$BUNDLE_ID" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && echo "    started via launchd ($PLIST)" || true
+  # Only ONE thing may start the app: launchd. Starting it with `open` as well put two instances in
+  # a race — the extra one hits the single-instance guard, exits immediately, and launchd reads those
+  # immediate exits as a crash loop and throttles the job (which is why the wallpaper stopped coming
+  # back after sleep). So: install the agent, kickstart it, and do not launch anything by hand.
+  PLIST="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  # every placeholder must be substituted: launchd refuses to spawn a job whose log path does not
+  # exist, which showed up as 'state = spawn scheduled' forever
+  sed "s|__APP__|$DEST/$APP_NAME.app|g; s|__BUNDLE_ID__|$BUNDLE_ID|g; s|__LOG__|$HOME/Library/Logs/$APP_NAME.log|g" \
+      support/launchagent.plist > "$PLIST"
+  if grep -q "__" "$PLIST"; then
+    echo "    ERROR: unsubstituted placeholder left in $PLIST:"; grep -n "__" "$PLIST" | sed 's/^/      /'
   fi
-  echo "==> launched; look for the sparkles icon in the menu bar"
+  install_launch_agent "$PLIST" || true
+  echo "==> running through launchd; the sparkles icon is in the menu bar (starts at login, restarts if killed)"
 fi
