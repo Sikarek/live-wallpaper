@@ -142,6 +142,47 @@ def verify():
     return ok
 
 
+def rates():
+    """Compare the angular rates the two renderers run: the desktop canvas's day length against the
+    duration of the video in the aerial slot. A mismatch here is exactly what makes the lock screen
+    look faster or slower than the desktop."""
+    import re
+    # desktop: the day length baked into the wallpaper the app is showing
+    selected = subprocess.run(["defaults", "read", "com.sikarek.livewallpaper", "selected"],
+                              capture_output=True, text=True).stdout.strip()
+    wallpaper = (f"{HOME}/Library/Application Support/LiveWallpaper/wallpapers/"
+                 f"{selected}/index.html") if selected else ""
+    desktop_seconds = None
+    if wallpaper and os.path.exists(wallpaper):
+        match = re.search(r"dayLength:\s*([0-9.]+)", open(wallpaper).read())
+        desktop_seconds = float(match.group(1)) if match else None
+
+    asset = selected_asset()
+    slot = slot_for(asset) if asset else ""
+    video_seconds = None
+    if slot and os.path.exists(slot):
+        info = probe(slot)
+        match = re.search(r"duration\s+([0-9.]+) s", info)
+        video_seconds = float(match.group(1)) if match else None
+
+    print(f"desktop wallpaper : {selected or '?'}  day length {desktop_seconds or '?'} s")
+    print(f"lock-screen video : {os.path.basename(slot) if slot else '?'}  duration {video_seconds or '?'} s")
+    if not desktop_seconds or not video_seconds:
+        print("  (need both to compare)")
+        return False
+    desktop_rate = 360.0 / desktop_seconds          # degrees per second of star rotation
+    lock_rate = 360.0 / video_seconds               # macOS plays an aerial at 1x real time
+    print(f"  star rotation   : desktop {desktop_rate:.3f} deg/s   lock screen {lock_rate:.3f} deg/s")
+    if abs(desktop_rate - lock_rate) < 0.005:
+        print("  MATCHED — the two sides turn at the same speed")
+        return True
+    faster = "faster" if lock_rate > desktop_rate else "slower"
+    print(f"  MISMATCH — the lock screen is {max(desktop_rate, lock_rate)/min(desktop_rate, lock_rate):.2f}x "
+          f"{faster} than the desktop")
+    print(f"  fix: re-render with  --seconds {desktop_seconds:.0f}  (or change the wallpaper's --day-length to {video_seconds:.0f})")
+    return False
+
+
 def diagnose():
     """Everything the system's aerial extension says about the slot, plus the format check."""
     verify()
@@ -289,6 +330,8 @@ def main():
                        help="nudge the system to rebuild its cached view of the slot")
     group.add_argument("--diagnose", action="store_true",
                        help="verify + dump what the system's wallpaper extension logged")
+    group.add_argument("--rates", action="store_true",
+                       help="compare the desktop's rotation rate with the lock-screen video's")
     args = ap.parse_args()
 
     if args.status:
@@ -303,6 +346,8 @@ def main():
         reapply()
     elif args.diagnose:
         diagnose()
+    elif args.rates:
+        sys.exit(0 if rates() else 1)
 
 
 if __name__ == "__main__":
