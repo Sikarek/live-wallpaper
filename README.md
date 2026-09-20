@@ -45,10 +45,19 @@ cd live-wallpaper
 A sparkles icon appears in the menu bar: wallpaper list, Pause / Resume, Reload (⌘R),
 Open Wallpapers Folder, Start at Login, Quit.
 
-### Starting it from a shell that has no GUI session
+### Opening it, and the `-10825` gotcha
 
-`open App.app` can fail (`LaunchServices error -10825`) in ssh/agent shells. The reliable route is a
-LaunchAgent, which also brings it back at login:
+A Dock-less (accessory) app has to implement `applicationShouldHandleReopen`. Without it, LaunchServices
+cannot hand a re-launch to the running instance and `open LiveWallpaper.app` fails with
+`_LSOpenURLsWithCompletionHandler() failed with error -10825` **whenever the app is already running** —
+which looks exactly like "the app won't open". This app implements it, so double-clicking while it runs
+just shows a note telling you where the menu-bar icon is (one instance, no stacking).
+
+A bundle LaunchServices has never seen can fail the same way once, which is why `./build.sh --install`
+registers the fresh bundle with `lsregister` before launching it.
+
+From a shell with no GUI session (ssh, agent), `open` may not be usable at all — use the LaunchAgent,
+which is also what brings it back at login:
 
 ```bash
 sed "s|__APP__|$HOME/Applications/LiveWallpaper.app|g; \
@@ -56,12 +65,16 @@ sed "s|__APP__|$HOME/Applications/LiveWallpaper.app|g; \
      s|__LOG__|$HOME/Library/Logs/LiveWallpaper.log|g" \
   support/launchagent.plist > ~/Library/LaunchAgents/com.sikarek.livewallpaper.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sikarek.livewallpaper.plist
-# remove it again:
-launchctl bootout gui/$(id -u)/com.sikarek.livewallpaper
+# restart / remove it again:
+launchctl kickstart -k gui/$(id -u)/com.sikarek.livewallpaper
+launchctl bootout    gui/$(id -u)/com.sikarek.livewallpaper
 ```
 
-The in-app **Start at Login** toggle (`SMAppService`) does the same thing from the GUI; a
-single-instance guard stops the two from stacking.
+`support/LiveWallpaper.command` (installed next to the app) is a double-clickable launcher for the same
+situation: it starts the binary directly and prints the pid and the stop/restart commands.
+
+The in-app **Start at Login** toggle (`SMAppService`) does the same thing from the GUI; a single-instance
+guard stops the two from stacking.
 
 ## Wallpapers
 

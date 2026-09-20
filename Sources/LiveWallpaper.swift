@@ -258,6 +258,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let debugRun = CommandLine.arguments.contains("--status") || CommandLine.arguments.contains("--seconds")
         if !debugRun, let id = Bundle.main.bundleIdentifier,
            NSRunningApplication.runningApplications(withBundleIdentifier: id).count > 1 {
+            // Tell the running instance to say hello, then get out of the way.
+            DistributedNotificationCenter.default().postNotificationName(
+                Notification.Name("com.sikarek.livewallpaper.ping"), object: nil, userInfo: nil,
+                deliverImmediately: true)
             NSLog("LIVEWALLPAPER another instance is already running — exiting")
             exit(0)
         }
@@ -265,6 +269,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
                                               name: NSApplication.didChangeScreenParametersNotification,
                                               object: nil)
+        // Someone tried to launch a second copy (usually: double-clicking the .app in Finder, or
+        // `open` on macOS 27 where an ad-hoc signature is refused). Say where the icon is.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.sikarek.livewallpaper.ping"), object: nil, queue: .main
+        ) { [weak self] _ in self?.announce() }
         buildStatusItem()
         library = Library.scan()
         if let saved = UserDefaults.standard.string(forKey: "selected"),
@@ -282,6 +291,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func screensChanged() {
         guard let current = host.current else { return }
         host.show(current)
+    }
+
+    /// Called by LaunchServices when someone re-launches the app (Finder double-click, `open`).
+    /// Without this, an already-running accessory app rejects the reopen request and `open` fails
+    /// with -10825 — which looks exactly like "the app won't open".
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        announce()
+        return true
+    }
+
+    /// Shown when a second launch is attempted: point at the menu-bar icon.
+    func announce() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "LiveWallpaper is already running"
+        alert.informativeText = """
+        Look for the sparkles icon in the menu bar — it has the wallpaper list, Pause/Resume,
+        Reload, Start at Login and Quit.
+
+        Currently playing: \(host.current?.name ?? "nothing")
+        """
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func writeStarterNote() {
@@ -403,6 +435,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func reportStatus() {
         NSLog("LIVEWALLPAPER level=\(Host.level) desktopIcon=\(Int(CGWindowLevelForKey(.desktopIconWindow))) screens=\(NSScreen.screens.count) wallpaper=\(host.current?.name ?? "none")")
         for line in host.status() { NSLog("LIVEWALLPAPER window \(line)") }
+        if let button = statusItem?.button {
+            let win = button.window.map { NSStringFromRect($0.frame) } ?? "nil"
+            NSLog("LIVEWALLPAPER statusItem button=\(NSStringFromRect(button.frame)) window=\(win) visible=\(button.isHidden == false) menuItems=\(statusItem.menu?.items.count ?? -1)")
+        } else {
+            NSLog("LIVEWALLPAPER statusItem MISSING")
+        }
         guard CommandLine.arguments.contains("--status") else { return }
         host.probeWeb { lines in
             for line in lines { NSLog("LIVEWALLPAPER \(line)") }
