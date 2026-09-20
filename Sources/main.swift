@@ -113,7 +113,7 @@ enum LockscreenTool {
             reason: "Live wallpaper is on screen")
 
         let argv = CommandLine.arguments
-        let debugRun = argv.contains("--set-target") || argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
+        let debugRun = argv.contains("--set-target") || argv.contains("--simulate-phase") || argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
             || argv.contains("--dump-a11y") || argv.contains("--restore-wallpaper") || argv.contains("--self-test") || argv.contains("--watch") || argv.contains("--simulate-lock")
 
         // One instance only: two of these would stack two sets of wallpaper windows.
@@ -200,6 +200,25 @@ enum LockscreenTool {
                 }
             }
         }
+        if argv.contains("--simulate-phase") {
+            // the phase alignment, without a real lock: note a lock, wait, then unlock and report what
+            // the page's star rotation became (it should be ~2pi * waited / dayLength)
+            noteScreenLocked()
+            let waited = Double(argv.firstIndex(of: "--simulate-phase").flatMap { index in
+                index + 1 < argv.count ? Double(argv[index + 1]) : nil
+            } ?? 4.0)
+            DispatchQueue.main.asyncAfter(deadline: .now() + waited) {
+                self.alignDesktopPhaseWithLockScreen()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    self.host.probe { entries in
+                        for entry in entries {
+                            NSLog("LIVEWALLPAPER simulate-phase: \(entry.label) \(entry.info)")
+                        }
+                        exit(0)
+                    }
+                }
+            }
+        }
         if argv.contains("--simulate-lock") {
             // what the unlock/wake observers do (used by the tests)
             let marker = appSupport.appendingPathComponent("lockscreen/aerial-slot.json")
@@ -266,6 +285,12 @@ enum LockscreenTool {
             forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
         ) { [weak self] _ in
             self?.refreshAerialPipeline(reason: "unlock")
+            self?.alignDesktopPhaseWithLockScreen()
+        }
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.noteScreenLocked()
         }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -291,6 +316,30 @@ enum LockscreenTool {
     }
 
     /// Is the screen locked right now? (CGSessionCopyCurrentDictionary is the supported way.)
+    /// When the screen locked, recorded so the desktop can be put at the phase the clip will be at.
+    private var lockedAt: Date?
+
+    func noteScreenLocked() {
+        lockedAt = Date()
+        // The Lock Screen clip always plays from the start of the sky's day, because the extension is
+        // restarted on every lock (the freeze workaround). So put the desktop there too, at the moment
+        // the display goes dark: the two surfaces are then at the same position, and the lock screen
+        // continues smoothly from the sky the desktop was showing instead of jumping somewhere else.
+        // With the power button the panel is already off; with ctrl-cmd-Q this lands during the fade.
+        if model.target.showsDesktop { host.setPhase(seconds: 0) }
+        NSLog("LIVEWALLPAPER screen locked — desktop moved to the clip's start so both agree")
+    }
+
+    /// The clip restarts at its first frame on every lock, so "how long has the lock screen been playing"
+    /// is simply "how long ago did the screen lock". Nothing to align unless we saw the lock.
+    private func alignDesktopPhaseWithLockScreen() {
+        guard model.target.showsDesktop, let lockedAt else { return }
+        let elapsed = Date().timeIntervalSince(lockedAt)
+        self.lockedAt = nil
+        host.setPhase(seconds: elapsed)
+        NSLog("LIVEWALLPAPER phase sync: clip has been playing \(Int(elapsed))s — desktop aligned to it")
+    }
+
     static func screenIsLocked() -> Bool {
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
         return (session["CGSSessionScreenIsLocked"] as? Bool) ?? false

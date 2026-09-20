@@ -44,6 +44,41 @@ struct ScreenSlot {
 final class WallpaperHost {
 
     private(set) var slots: [ScreenSlot] = []
+
+    /// Tell every page which moment of its day to be at.
+    ///
+    /// The Lock Screen can only play a looping video, and the extension restarts it on each lock (the
+    /// freeze workaround) — so the clip always begins at its first frame while the desktop follows the
+    /// wall clock. Calling this just after unlock puts the desktop at the same phase the clip is at, so
+    /// the two show the same sky instead of the same scene a few hours apart.
+    func setPhase(seconds: Double, attempt: Int = 1) {
+        var applied = 0
+        for slot in slots {
+            guard let web = slot.web else { continue }
+            applied += 1
+            // A silent failure here is invisible: the phase simply stays at the wall clock and the two
+            // surfaces disagree, so report both the error and what the page says afterwards.
+            web.evaluateJavaScript("window.__lwSetPhase && window.__lwSetPhase(\(seconds))") { _, error in
+                if let error {
+                    NSLog("LIVEWALLPAPER setPhase(\(seconds)) FAILED on \(slot.displayID): "
+                          + error.localizedDescription)
+                }
+            }
+            web.evaluateJavaScript("(typeof window.__lwTitleInfo === 'function') ? window.__lwTitleInfo() : 'no-report'") {
+                value, error in
+                let text = (value as? String) ?? "nil"
+                NSLog("LIVEWALLPAPER setPhase(\(seconds)) -> display \(slot.displayID): \(text.prefix(150))"
+                      + (error.map { " [\($0.localizedDescription)]" } ?? ""))
+            }
+        }
+        // A phase asked for before the pages finished loading would otherwise be lost (the request only
+        // exists in the page's memory), so retry a few times while the pages settle.
+        if applied == 0 && attempt <= 6 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+                self?.setPhase(seconds: seconds, attempt: attempt + 1)
+            }
+        }
+    }
     private var players: [AVQueuePlayer] = []       // one per distinct video wallpaper
     private var loopers: [AVPlayerLooper] = []      // AVPlayerLooper deallocates if not retained
     private var syncTimer: Timer?
@@ -189,6 +224,10 @@ final class WallpaperHost {
                 self.injectHostScript(into: view)
                 self.syncNow()
             }
+            // A regenerated wallpaper keeps its path, so WebKit would serve the previous HTML from its
+            // cache — which makes an updated page (new JS hooks, a different scene) look like it had no
+            // effect. loadFileURL is kept because it is what grants read access to the assets folder.
+            URLCache.shared.removeAllCachedResponses()
             view.loadFileURL(wallpaper.renderURL,
                              allowingReadAccessTo: wallpaper.renderURL.deletingLastPathComponent())
             window.contentView = view
@@ -322,7 +361,11 @@ final class WallpaperHost {
           h: window.innerHeight,
           dpr: window.devicePixelRatio,
           anim: times,
-          epoch: window.__lwEpoch
+          epoch: window.__lwEpoch,
+          // the wallpaper's own report, when it has one (the Starbound page exposes __lwTitleInfo):
+          // without this the host probe says nothing about what the page actually drew or which phase it
+          // thinks it is at, which is exactly what a phase-alignment bug hides behind
+          page: (typeof window.__lwTitleInfo === 'function') ? window.__lwTitleInfo() : null
         };
         // a canvas wallpaper may publish its own animation state (e.g. the Starbound title screen)
         try {

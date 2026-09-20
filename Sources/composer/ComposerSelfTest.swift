@@ -679,12 +679,14 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         var folder: URL?
         var query: String?
+        var evalScript: String?
         var size = NSSize(width: 1280, height: 720)
         var index = 0
         while index < arguments.count {
             switch arguments[index] {
             case "--probe":  index += 1; if index < arguments.count { folder = URL(fileURLWithPath: arguments[index]) }
             case "--query":  index += 1; if index < arguments.count { query = arguments[index] }
+            case "--eval":   index += 1; if index < arguments.count { evalScript = arguments[index] }
             case "--size":
                 index += 1
                 if index < arguments.count {
@@ -701,7 +703,18 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
         let view = ProbeWebView(frame: NSRect(origin: .zero, size: size),
                                 configuration: WKWebViewConfiguration())
         view.query = query
+        var didEval = false
         view.onProbe = { text in
+            if let evalScript, !didEval {
+                // poke the page first (e.g. --eval "window.__lwSetPhase(6)"), then report what changed
+                didEval = true
+                view.evaluateJavaScript(evalScript) { _, error in
+                    if let error { print("  eval error: \(error.localizedDescription)") }
+                    print("  eval: \(evalScript)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { view.probe() }
+                }
+                return
+            }
             if text.hasPrefix("LWERROR") || text.hasPrefix("ERROR") {
                 print("PAGE ERROR: \(text)"); exit(1)
             }
@@ -711,7 +724,8 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
             }
             print("== page report ==")
             for key in ["w", "h", "starsDrawn", "clouds", "cloudsDrawn", "orbitersDrawn", "horizonWidth",
-                        "starRotation", "pixelRatio", "planetRatio", "frames", "fps"] {
+                        "starRotation", "pixelRatio", "planetRatio", "frames", "fps",
+                        "setPhase", "pageSeconds", "dayLength"] {
                 print("  \(key): \(json[key] ?? "—")")
             }
             print("  cloudState: \(json["cloudState"] ?? "—")")

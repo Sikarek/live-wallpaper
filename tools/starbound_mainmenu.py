@@ -157,6 +157,28 @@ var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // and then never again. Redraw once whenever an image arrives, and remember the clock for it.
 var started = false, forcedValue = null, lastSeconds = 0;
 
+// The Lock Screen plays a LOOPING VIDEO, and the extension restarts it on every lock (the freeze
+// workaround), so the clip always begins at its first frame — i.e. at the start of the sky's day. The
+// desktop, meanwhile, follows the wall clock. Without this they show the same scene at different
+// phases: a differently rotated starfield and the moons somewhere else.
+// The host calls __lwSetPhase(seconds) on unlock with "how long the lock screen has been playing", so
+// the desktop picks up exactly where the clip was.
+var phaseTarget = null;
+window.__lwSetPhase = function (seconds) {
+  var phase = ((seconds % CFG.dayLength) + CFG.dayLength) % CFG.dayLength;
+  phaseTarget = phase;
+  // remember it as an offset from the wall clock: a reload (display change, wake, geometry repair)
+  // then keeps the alignment instead of snapping back to the clock's own phase
+  try { sessionStorage.setItem('lwPhase', String(Date.now() - phase * 1000)); } catch (e) {}
+};
+try {
+  var saved = sessionStorage.getItem('lwPhase');
+  if (saved !== null) {
+    var savedPhase = (Date.now() - parseFloat(saved)) / 1000;
+    phaseTarget = ((savedPhase % CFG.dayLength) + CFG.dayLength) % CFG.dayLength;
+  }
+} catch (e) {}
+
 function scheduleRedraw() {
   if (!started) return;
   setTimeout(function () { frame(forcedValue !== null ? forcedValue : lastSeconds); }, 0);
@@ -423,7 +445,9 @@ function start() {
   var forced = new URLSearchParams(location.search).get('t');
 
   window.__lwTitleInfo = function () {
-    var seconds = forced !== null ? parseFloat(forced) : currentSeconds();
+    // lastSeconds is what the last drawn frame used; the wall clock is NOT the same thing once the host
+    // has asked for a specific phase, and reporting the clock hides whether an alignment landed
+    var seconds = forced !== null ? parseFloat(forced) : (lastSeconds || currentSeconds());
     return JSON.stringify({
       dayLength: CFG.dayLength,
       pixelRatio: Math.round(pixelRatio * 1000) / 1000,
@@ -439,6 +463,8 @@ function start() {
       frameMs: (window.__lwFrameStats ? window.__lwFrameStats().medianMs : null),
       fps: (window.__lwFrameStats ? window.__lwFrameStats().fps : null),
       frames: (window.__lwFrameStats ? window.__lwFrameStats().frames : null),
+      setPhase: typeof window.__lwSetPhase === 'function',      // is this the current page or a cached one?
+      pageSeconds: Math.round(seconds % CFG.dayLength),
       cloudState: cloudImages.map(function (i) { return (i.complete ? 'done' : 'loading') + ':' + i.naturalWidth; }).join(' '),
       horizonWidth: horizonImage.naturalWidth,
       starWidths: starSheets.map(function (i) { return i.naturalWidth; }).join(','),
@@ -455,9 +481,19 @@ function start() {
   // ?t= renders a fixed moment for the tests. Keep redrawing it: sprites load asynchronously, so a
   // single early draw would capture an empty scene.
   if (reduceMotion) {
+    // Reduced motion: draw one moment and keep drawing it. It still has to honour a phase request —
+    // without this the host's alignment silently does nothing here (which is exactly how "the desktop
+    // and the lock screen never match" survived several rounds of testing).
     var stillTime = forcedValue !== null ? forcedValue : currentSeconds();
     frame(stillTime);
-    setInterval(function () { frame(stillTime); }, 250);
+    setInterval(function () {
+      if (phaseTarget !== null) {
+        var nowSeconds = currentSeconds();
+        stillTime = nowSeconds - (nowSeconds % CFG.dayLength) + phaseTarget;
+        phaseTarget = null;
+      }
+      frame(forcedValue !== null ? forcedValue : stillTime);
+    }, 250);
     return;
   }
 
@@ -486,6 +522,14 @@ function start() {
       accumulator = 0;
     }
     accumulator += delta;
+    if (phaseTarget !== null) {                 // the host asked for a specific phase (just unlocked)
+      // "be at phase P NOW": align to the start of the current day, then add P. Anchored to the clock at
+      // this instant — anchoring it to the page's load time instead puts the sky at an arbitrary phase.
+      var nowSeconds = currentSeconds();
+      skyTime = nowSeconds - (nowSeconds % CFG.dayLength) + phaseTarget;
+      phaseTarget = null;
+      accumulator = 0;
+    }
     var steps = 0;
     while (accumulator >= STEP && steps < 60) { skyTime += STEP; accumulator -= STEP; steps++; }
     if (frameDeltas.length < 240) frameDeltas.push(delta * 1000);
@@ -583,6 +627,9 @@ def main():
                     help="surface liquid as the horizon's base image: " + ", ".join(LIQUIDS) + ", or none")
     ap.add_argument("--hue-shift", type=float, default=0.0,
                     help="hue rotation in degrees applied to the base image (the engine's biome hueShift)")
+    ap.add_argument("--from-plan", default="",
+                    help="read a wallpaper folder's backdrop.json and use its values for anything not "
+                         "given explicitly — regenerates the same scene with the current page code")
     ap.add_argument("--dump-options", action="store_true",
                     help="print the palette of choices as JSON (the Composer app builds its pickers "
                          "from this, so the two can never drift apart) and exit")
@@ -608,6 +655,49 @@ def main():
                          "seed": 1234567},
         }, indent=2))
         return
+
+    if args.from_plan:
+        plan_path = os.path.join(os.path.expanduser(args.from_plan), "backdrop.json")
+        if not os.path.exists(plan_path):
+            sys.exit(f"no backdrop.json in {args.from_plan}")
+        with open(plan_path) as handle:
+            plan_in = _json.load(handle)
+        # explicit flags win; anything still at its default comes from the plan
+        if args.planet == "garden" and plan_in.get("planet"):
+            args.planet = plan_in["planet"]
+        if args.masks == ",".join(DEFAULT_MASKS) and plan_in.get("masks"):
+            args.masks = ",".join(str(m) for m in plan_in["masks"])
+        if args.mask_alpha == 0.18 and plan_in.get("maskAlpha") is not None:
+            args.mask_alpha = plan_in["maskAlpha"]
+        if args.liquid == "none" and plan_in.get("liquid"):
+            args.liquid = plan_in["liquid"]
+        if args.hue_shift == 0.0 and plan_in.get("hueShift") is not None:
+            args.hue_shift = plan_in["hueShift"]
+        if args.cloud_alpha == 3.0 and plan_in.get("cloudAlpha") is not None:
+            args.cloud_alpha = plan_in["cloudAlpha"]
+        if args.day_length == 600.0 and plan_in.get("dayLength") is not None:
+            args.day_length = plan_in["dayLength"]
+        if args.stars_per_cell == STAR_CELL_COUNT and plan_in.get("starsPerCell") is not None:
+            args.stars_per_cell = plan_in["starsPerCell"]
+        if args.seed == 1234567 and plan_in.get("seed") is not None:
+            args.seed = plan_in["seed"]
+        if args.moon_size == 1.0 and plan_in.get("moonSize") is not None:
+            args.moon_size = plan_in["moonSize"]
+        if args.planet_size == 1.0 and plan_in.get("planetSize") is not None:
+            args.planet_size = plan_in["planetSize"]
+        if args.disc_shadow == 0 and plan_in.get("discShadow") is not None:
+            args.disc_shadow = plan_in["discShadow"]
+        bodies = plan_in.get("orbiters", [])
+        parents = [b for b in bodies if b.get("parent")]
+        moons = [b for b in bodies if not b.get("parent")]
+        if args.parent_planet == "none" and parents:
+            args.parent_planet = parents[0]["type"]
+        if args.moons == 0 and moons:
+            args.moons = min(3, len(moons))
+            if not args.moon_types:
+                args.moon_types = ",".join(b["type"] for b in moons)
+        print(f"# from-plan: {plan_path} -> planet={args.planet} liquid={args.liquid} "
+              f"masks={args.masks} moons={args.moons} parent={args.parent_planet} seed={args.seed}")
 
     out = os.path.expanduser(args.out)
     assets = os.path.join(out, "assets")
