@@ -134,7 +134,8 @@ enum LockscreenTool {
                                               name: NSApplication.didChangeOcclusionStateNotification,
                                               object: nil)
         Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            self?.host.updateOcclusion()
+            guard let self, self.occlusionEnabled else { return }   // --pause-test switches this off
+            self.host.updateOcclusion()
         }
         // A second launch (Finder double-click, `open`) asks the running instance to show itself.
         DistributedNotificationCenter.default().addObserver(
@@ -249,6 +250,7 @@ enum LockscreenTool {
         if argv.contains("--self-test") { runSelfTest() }
         if argv.contains("--restore-wallpaper") { restoreAndExit() }
         if argv.contains("--pause-test") {
+            occlusionEnabled = false
             // Pause and resume ONE visible display and watch its own frame counter. This has to run here,
             // in a real on-screen window: an off-screen WKWebView never delivers requestAnimationFrame, so
             // a probe tool cannot exercise the animated path at all (it silently measures the still branch).
@@ -711,7 +713,12 @@ enum LockscreenTool {
         NSWorkspace.shared.activateFileViewerSelecting([wallpapersDir])
     }
 
+    /// Disabled only by --pause-test, which forces pauses and resumes itself and would otherwise have its
+    /// own work undone (or redone) by the production timer mid-measurement.
+    private var occlusionEnabled = true
+
     @objc private func occlusionChanged() {
+        guard occlusionEnabled else { return }
         host.updateOcclusion()
     }
 
