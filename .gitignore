@@ -22,3 +22,7 @@ __pycache__/
 
 # allow committed screenshots
 !docs/**
+
+# compiled helper binaries (built into build/ by build.sh)
+tools/probe_video
+tools/rendertitle
