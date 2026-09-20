@@ -282,6 +282,10 @@ build/rendertitle .../starbound.mov <wallpaper-assets-dir> \
 python3 tools/lockscreen.py --install .../starbound.mov   # video + the asset's still image
 python3 tools/lockscreen.py --verify                      # format + is the system decoding it?
 python3 tools/lockscreen.py --reapply                     # nudge the extension's cache
+
+Render times worth knowing (M2 Max): a 600 s cycle at 240 fps is 144,000 output frames and takes ~25
+minutes at `--fps 15` (9,000 rendered frames, each repeated 16x) or ~35 minutes at `--fps 30`. A reboot
+or logout kills the render — it runs as a child of your shell — so finish it before restarting.
 ```
 
 `--verify` checks the two things that indicate health: the file matches Apple's encoding, and a
