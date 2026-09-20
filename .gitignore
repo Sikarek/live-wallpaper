@@ -1,0 +1,21 @@
+# build output
+build/
+*.app
+
+# macOS noise
+.DS_Store
+
+# wallpapers: generated art and personal media stay local.
+# Tools write to ~/Library/Application Support/LiveWallpaper/wallpapers by default,
+# but --out ./wallpapers is handy during development, so ignore it here too.
+wallpapers/
+*.mp4
+*.mov
+*.m4v
+*.png
+*.jpg
+*.jpeg
+
+# python
+__pycache__/
+*.pyc

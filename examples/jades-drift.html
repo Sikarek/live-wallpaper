@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wallpaper — JADES drift</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #03060f; }
+  /* min-size gives preview frames something to measure; harmless when fullscreen in Plash */
+  body { min-width: 640px; min-height: 420px; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/* Palette. Change MODE to 'light' for a paper-white desktop. */
+const PALETTE = {
+  dark:  { bg: '#03060f', neb: ['#1b2f6b', '#5b2a6e', '#0e4d5c'], star: '255,255,255', starA: 1.00 },
+  light: { bg: '#f8f7f3', neb: ['#c9d6f2', '#e9d3ee', '#c6ebe4'], star: '38,48,78',   starA: 0.75 }
+};
+const MODE = 'dark';
+const P = PALETTE[MODE];
+
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let W = 0, H = 0, DPR = 1, neb = null, stars = [], paused = false;
+
+const hexA = (hex, a) => {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+};
+
+/* Nebula is baked once, at half resolution, then blitted scaled up (cheaper + softer). */
+function makeNebula(w, h) {
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const o = off.getContext('2d');
+  o.fillStyle = P.bg;
+  o.fillRect(0, 0, w, h);
+  const blobs = [
+    { x: 0.18, y: 0.20, r: 0.70, c: P.neb[0], a: 0.62 },
+    { x: 0.84, y: 0.28, r: 0.58, c: P.neb[1], a: 0.52 },
+    { x: 0.46, y: 0.86, r: 0.80, c: P.neb[2], a: 0.46 },
+    { x: 0.64, y: 0.56, r: 0.42, c: P.neb[0], a: 0.34 }
+  ];
+  for (const b of blobs) {
+    const R = b.r * Math.max(w, h);
+    const g = o.createRadialGradient(b.x * w, b.y * h, 0, b.x * w, b.y * h, R);
+    g.addColorStop(0, hexA(b.c, b.a));
+    g.addColorStop(1, hexA(b.c, 0));
+    o.fillStyle = g;
+    o.fillRect(0, 0, w, h);
+  }
+  return off;
+}
+
+function seedStars() {
+  stars = [];
+  for (let i = 0; i < 520; i++) {
+    const d = 0.25 + Math.random() * 0.75;          // depth → parallax speed
+    stars.push({
+      x: Math.random(), y: Math.random(), d,
+      r: 0.4 + d * 1.5,
+      tw: Math.random() * Math.PI * 2,
+      tS: 0.4 + Math.random() * 1.2
+    });
+  }
+}
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  c.width = Math.round(W * DPR); c.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  neb = makeNebula(Math.round(W / 2), Math.round(H / 2));
+  seedStars();
+}
+
+function draw(now, dt) {
+  ctx.fillStyle = P.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  const ox = (-0.03 + Math.sin(now / 90000) * 0.02) * W;   // very slow parallax drift
+  ctx.drawImage(neb, ox, -0.02 * H, W * 1.06, H * 1.06);
+
+  for (const st of stars) {
+    st.x += dt * 0.000004 * st.d;
+    st.y += dt * 0.0000015 * st.d;
+    if (st.x > 1.02) st.x -= 1.04;
+    if (st.y > 1.02) st.y -= 1.04;
+    const a = (0.55 + 0.45 * Math.sin(st.tw + now * 0.0006 * st.tS)) * P.starA;
+    ctx.fillStyle = `rgba(${P.star},${a.toFixed(3)})`;
+    ctx.beginPath();
+    ctx.arc(st.x * W, st.y * H, st.r, 0, 6.2832);
+    ctx.fill();
+  }
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(50, now - last);
+  last = now;
+  if (!paused) draw(now, dt);
+  requestAnimationFrame(frame);
+}
+
+document.addEventListener('visibilitychange', () => { paused = document.hidden; last = performance.now(); });
+window.addEventListener('resize', resize);
+
+resize();
+if (reduce) { draw(0, 0); }        // honour "Reduce motion": draw one static frame
+else { requestAnimationFrame(frame); }
+</script>
+</body>
+</html>
