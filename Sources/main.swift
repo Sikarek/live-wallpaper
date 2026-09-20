@@ -93,10 +93,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         if argv.contains("--simulate-lock") {
-            // what the lock/unlock observers do (used by the tests)
-            NSLog("LIVEWALLPAPER simulate-lock: marker exists = \(FileManager.default.fileExists(atPath: appSupport.appendingPathComponent("lockscreen/aerial-slot.json").path))")
-            self.restartAerialIfOurs(reason: "simulate-lock")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { exit(0) }
+            // what the unlock/wake observers do (used by the tests)
+            let marker = appSupport.appendingPathComponent("lockscreen/aerial-slot.json")
+            NSLog("LIVEWALLPAPER simulate-lock: marker exists = \(FileManager.default.fileExists(atPath: marker.path))")
+            self.refreshAerialPipeline(reason: "simulate-unlock")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                let ext = Process()
+                ext.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+                ext.arguments = ["-f", "WallpaperAerialsExtension"]
+                let pipe = Pipe()
+                ext.standardOutput = pipe
+                try? ext.run()
+                ext.waitUntilExit()
+                let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                NSLog("LIVEWALLPAPER simulate-lock: aerials extension running = \(!out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)")
+                exit(0)
+            }
         }
         if argv.contains("--status") { reportStatus() }
         if argv.contains("--self-test") { runSelfTest() }
@@ -122,39 +134,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// macOS 26+ has a bug in WallpaperExtensionKit: a *custom* aerial video plays once and then
     /// freezes / goes static on every later lock (Apple's own aerials take a different code path
-    /// inside ShuffleWallpaper and are unaffected). The community fix is to restart
-    /// WallpaperAerialsExtension while the lock animation plays, so the player comes up fresh.
-    /// Only done when OUR video is the one in the aerial slot — that is what the marker file records.
+    /// inside ShuffleWallpaper and are unaffected).
+    ///
+    /// The fix is to give the pipeline a fresh player — but restart the *agent*, not the extension:
+    /// killing WallpaperAerialsExtension leaves the lock screen with no renderer at all, and macOS
+    /// then falls back to a default static picture. `killall WallpaperAgent` re-exports the wallpaper
+    /// and respawns the extension within ~2 s (verified), which is what this does on unlock and on
+    /// wake from sleep — never while the lock screen is up.
+    /// Only done when OUR video is in the aerial slot (that is what the marker file records).
     private func watchLockForAerialFreeze() {
-        for name in ["com.apple.screenIsLocked", "com.apple.screenIsUnlocked"] {
-            DistributedNotificationCenter.default().addObserver(
-                forName: Notification.Name(name), object: nil, queue: .main) { [weak self] _ in
-                    self?.restartAerialIfOurs(reason: name)
-                }
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.refreshAerialPipeline(reason: "unlock")
         }
         NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-                self?.restartAerialIfOurs(reason: "wake from sleep")
-            }
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.refreshAerialPipeline(reason: "wake from sleep")
+        }
     }
 
-    /// Restart the aerial extension, but only when our own video is the one in the slot (the marker
-    /// file written by tools/lockscreen.py --install records that).
-    func restartAerialIfOurs(reason: String) {
+    /// Restart WallpaperAgent (which re-exports the wallpaper and respawns its extension) — only when
+    /// our own video is the one in the slot, recorded by tools/lockscreen.py --install.
+    func refreshAerialPipeline(reason: String) {
         let marker = appSupport.appendingPathComponent("lockscreen/aerial-slot.json")
         guard FileManager.default.fileExists(atPath: marker.path) else {
-            NSLog("LIVEWALLPAPER (\(reason)) no aerial marker — not touching the system wallpaper extension")
+            NSLog("LIVEWALLPAPER (\(reason)) no aerial marker — leaving the system wallpaper alone")
             return
         }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        task.arguments = ["WallpaperAerialsExtension"]
+        task.arguments = ["WallpaperAgent"]
         do {
             try task.run()
             task.waitUntilExit()
-            NSLog("LIVEWALLPAPER (\(reason)) restarted WallpaperAerialsExtension so the custom aerial keeps animating")
+            NSLog("LIVEWALLPAPER (\(reason)) restarted WallpaperAgent so the custom aerial keeps animating")
         } catch {
-            NSLog("LIVEWALLPAPER (\(reason)) could not restart the extension: \(error.localizedDescription)")
+            NSLog("LIVEWALLPAPER (\(reason)) could not restart the wallpaper agent: \(error.localizedDescription)")
         }
     }
 

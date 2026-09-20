@@ -132,9 +132,13 @@ def verify():
         ok = False
     if size and (int(size.group(1)) < 3840):
         print(f"  note: {size.group(0)} — Apple serves these at 4K (the system will scale yours)")
+    # the renderer must EXIST or the lock screen falls back to a default static picture
+    ext = subprocess.run(["pgrep", "-f", "WallpaperAerialsExtension"], capture_output=True, text=True).stdout.strip()
+    print(f"  aerial renderer : {'running (pid ' + ext.splitlines()[0] + ')' if ext else 'NOT RUNNING — the lock screen will show a default picture'}")
+    if not ext:
+        ok = False
     decoders = decoder_running()
-    print(f"  decoder process: {'yes' if decoders else 'not running'}"
-          f"{' — the extension is playing the slot' if decoders else ' — lock the screen to start it'}")
+    print(f"  decoder process : {'yes' if decoders else 'idle (normal while your desktop window covers the aerial)'}")
     return ok
 
 
