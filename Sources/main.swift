@@ -37,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let argv = CommandLine.arguments
         let debugRun = argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
-            || argv.contains("--dump-a11y") || argv.contains("--self-test") || argv.contains("--watch")
+            || argv.contains("--dump-a11y") || argv.contains("--self-test") || argv.contains("--watch") || argv.contains("--simulate-lock")
 
         // One instance only: two of these would stack two sets of wallpaper windows.
         if !debugRun, let id = Bundle.main.bundleIdentifier,
@@ -58,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         wireModel()
         buildStatusItem()
+        watchLockForAerialFreeze()
 
         model.refresh(keepSelection: false)
         model.refreshDisplays()
@@ -91,6 +92,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
         }
+        if argv.contains("--simulate-lock") {
+            // what the lock/unlock observers do (used by the tests)
+            NSLog("LIVEWALLPAPER simulate-lock: marker exists = \(FileManager.default.fileExists(atPath: appSupport.appendingPathComponent("lockscreen/aerial-slot.json").path))")
+            self.restartAerialIfOurs(reason: "simulate-lock")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { exit(0) }
+        }
         if argv.contains("--status") { reportStatus() }
         if argv.contains("--self-test") { runSelfTest() }
 
@@ -111,6 +118,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showWindow(nil)
         return true
+    }
+
+    /// macOS 26+ has a bug in WallpaperExtensionKit: a *custom* aerial video plays once and then
+    /// freezes / goes static on every later lock (Apple's own aerials take a different code path
+    /// inside ShuffleWallpaper and are unaffected). The community fix is to restart
+    /// WallpaperAerialsExtension while the lock animation plays, so the player comes up fresh.
+    /// Only done when OUR video is the one in the aerial slot — that is what the marker file records.
+    private func watchLockForAerialFreeze() {
+        for name in ["com.apple.screenIsLocked", "com.apple.screenIsUnlocked"] {
+            DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name(name), object: nil, queue: .main) { [weak self] _ in
+                    self?.restartAerialIfOurs(reason: name)
+                }
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.restartAerialIfOurs(reason: "wake from sleep")
+            }
+    }
+
+    /// Restart the aerial extension, but only when our own video is the one in the slot (the marker
+    /// file written by tools/lockscreen.py --install records that).
+    func restartAerialIfOurs(reason: String) {
+        let marker = appSupport.appendingPathComponent("lockscreen/aerial-slot.json")
+        guard FileManager.default.fileExists(atPath: marker.path) else {
+            NSLog("LIVEWALLPAPER (\(reason)) no aerial marker — not touching the system wallpaper extension")
+            return
+        }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        task.arguments = ["WallpaperAerialsExtension"]
+        do {
+            try task.run()
+            task.waitUntilExit()
+            NSLog("LIVEWALLPAPER (\(reason)) restarted WallpaperAerialsExtension so the custom aerial keeps animating")
+        } catch {
+            NSLog("LIVEWALLPAPER (\(reason)) could not restart the extension: \(error.localizedDescription)")
+        }
     }
 
     /// Any change to the display layout — count, resolution, arrangement — rebuilds every window from

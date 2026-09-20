@@ -256,7 +256,7 @@ func drawFrame(context ctx: CGContext, time t: Double) {
         else { continue }
         let px = sx * pixelRatio, py = sy * pixelRatio
         ctx.draw(cropped, in: CGRect(x: px - Double(cropped.width) / 2,
-                                     y: Double(height) - py - Double(cropped.height) / 2,
+                                     y: py - Double(cropped.height) / 2,   // CG is already y-up
                                      width: Double(cropped.width), height: Double(cropped.height)))
     }
     ctx.setShouldAntialias(true)
@@ -276,7 +276,7 @@ func drawFrame(context ctx: CGContext, time t: Double) {
         let cw = Double(image.width) * planetRatio, ch = Double(image.height) * planetRatio
         ctx.setBlendMode(.screen)
         ctx.draw(image, in: CGRect(x: x * pixelRatio - cw / 2,
-                                   y: Double(height) - y * pixelRatio - ch / 2,
+                                   y: y * pixelRatio - ch / 2,           // y-up: bottom at y, not H-y
                                    width: cw, height: ch))
         ctx.setBlendMode(.normal)
     }

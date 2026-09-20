@@ -291,6 +291,23 @@ Caveats: re-picking a wallpaper in System Settings, or a macOS update, can re-do
 and undo the lock screen — re-run `--install`. And the lock screen shows the *video*, not the live
 canvas: same scene, but it cannot react or change.
 
+### The macOS 26 freeze bug (and the workaround this repo applies)
+
+A **custom** aerial video plays once and then goes static on every later lock. It is not your file: it
+is a defect in `WallpaperExtensionKit`'s video-player state machine — on a re-lock, `WallpaperAgent`
+sends `activityState = active` and the player's `ramp`/`preroll` state is not reset for non-Apple
+entries. Apple's own aerials go through `ShuffleWallpaper` and are unaffected.
+
+The workaround (what the small community daemons do too) is to restart `WallpaperAerialsExtension`
+while the lock animation plays, so the player starts fresh — invisible, because it happens during the
+transition. LiveWallpaper does this itself: `tools/lockscreen.py --install` writes a marker file, and
+the app then restarts that extension on `com.apple.screenIsLocked` / `screenIsUnlocked` / wake from
+sleep — but only while the marker exists, so it never touches the system's own wallpaper otherwise.
+
+```bash
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --simulate-lock   # exercises that handler
+```
+
 ## Performance (measured, M2 Max, 3 displays incl. a 1512x982 Retina built-in)
 
 | content | CPU (whole process tree) |

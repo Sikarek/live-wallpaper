@@ -20,6 +20,7 @@ Caveats worth knowing:
     still get the interactive wallpaper after login.
 """
 import argparse
+import json
 import os
 import plistlib
 import shutil
@@ -237,6 +238,13 @@ def install(video):
     os.chmod(slot, 0o600)                       # Apple's own files are 0600
     print(f"  installed {video} -> {slot} ({os.path.getsize(slot)/1_000_000:.1f} MB)")
     swap_thumbnail(asset, slot)
+    # marker the app watches: while this exists, it restarts WallpaperAerialsExtension on lock/wake,
+    # which is the only way custom aerial videos keep animating on macOS 26+
+    marker = os.path.join(f"{HOME}/Library/Application Support/LiveWallpaper/lockscreen", "aerial-slot.json")
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    with open(marker, "w") as handle:
+        json.dump({"assetID": asset, "video": video, "installed": time.time()}, handle, indent=2)
+    print(f"  wrote {marker} (the app restarts the aerial extension on lock/wake while this exists)")
     restart_wallpaper_agent()
     print("\n  Lock the screen (Control-Command-Q) to see it. The login window at boot uses the same slot.")
 
@@ -257,6 +265,10 @@ def restore():
         shutil.copy2(saved, thumb)
         os.chmod(thumb, 0o600)
         print(f"  restored Apple's still -> {thumb}")
+    marker = f"{HOME}/Library/Application Support/LiveWallpaper/lockscreen/aerial-slot.json"
+    if os.path.exists(marker):
+        os.remove(marker)
+        print(f"  removed {marker} (the app stops restarting the extension)")
     restart_wallpaper_agent()
 
 
