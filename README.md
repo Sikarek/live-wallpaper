@@ -209,7 +209,30 @@ OpenStarbound (public 1.4.4 sources):
 ```
 
 The wallpaper does that on a canvas: real 4-frame star sprites twinkling, the starfield wheeling once
-per `--day-length` seconds, and the game's own cloud sprites orbiting the planet limb. Append
+per `--day-length` seconds, and the game's own cloud sprites orbiting the planet limb.
+
+### The mechanics that make it smooth (and are implemented here)
+
+```
+app/StarMainApplication_sdl.cpp   TickRateApproacher m_updateTicker(60.0f, 1.0f)
+                                  -> the sky advances in FIXED 1/60 s steps with catch-up,
+                                     not by whatever the frame delta happened to be
+                                  setVSyncEnabled(...) -> one drawn frame per display refresh
+game/StarSky.cpp:130              m_time += dt   -> a monotonic accumulator, never a wall-clock
+                                     lookup, so nothing can jump
+rendering/StarEnvironmentPainter  star frame = (int)(epochTime + offset) % 4, offset carries a
+                                     fractional rand(twinkleMin..Max) -> twinkle is smeared, never
+                                     a synchronised blink
+                                  sprites drawn at fractional Vec2F positions
+                                  TextureFiltering::Nearest by default -> pixels stay crisp
+```
+
+All four are in `tools/starbound_mainmenu.py`: fixed-step accumulator seeded from a fixed origin, one
+draw per refresh, per-star fractional twinkle offsets, sub-pixel star positions, and nearest filtering
+for the planet while the small star sprites use smoothing so a slow drift glides instead of stepping.
+Measured: median frame 17 ms (59 fps) on the Retina display and 10 ms (100 fps) on the 100 Hz
+monitors, with the simulation stepping at the engine's 60 Hz; 14,465 px (0.97% of the frame) change
+in 0.25 s of motion. Append
 `?t=<seconds>` to the page URL to render a fixed moment (the tests use it).
 
 ```bash

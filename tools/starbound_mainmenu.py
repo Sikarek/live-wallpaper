@@ -107,7 +107,7 @@ var W = 0, H = 0, DPR = 1;
 var planetRatio = 1, pixelRatio = 1, view = { w: 0, h: 0 };
 var horizonImage = new Image();
 var cloudImages = [], starSheets = [], starFrameSize = [];
-var clouds = [], starTypes = [];
+var clouds = [], starTypes = [], starField = [];
 var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -139,7 +139,32 @@ function setupSprites() {
   }
 }
 
-// star types: big/medium/small as in /sky.config's star list
+// star field: built ONCE (the engine's Random2dPointGenerator) and then only transformed per frame.
+// Re-hashing ~10k candidate cells every frame was what forced the 30 fps cap; the engine instead
+// generates the field on a world-seed change and just draws it.
+function buildStarField() {
+  starField = [];
+  var cell = CFG.starCellSize;
+  var reach = Math.sqrt(view.w * view.w + view.h * view.h) / 2 + cell * 2;
+  var cells = Math.ceil(reach / cell);
+  var density = CFG.starCellCount;
+  for (var gy = -cells; gy <= cells; gy++) {
+    for (var gx = -cells; gx <= cells; gx++) {
+      for (var k = 0; k < density; k++) {
+        var fx = gx * cell + hash2(gx * 31 + k, gy * 17 + k, 5) * cell;
+        var fy = gy * cell + hash2(gx * 13 + k, gy * 29 + k, 6) * cell;
+        if (fx * fx + fy * fy > reach * reach) continue;          // keep a disc: covers any rotation
+        starField.push({
+          x: fx, y: fy,
+          type: Math.floor(hash2(gx + k, gy - k, 8) * starSheets.length),
+          offset: Math.floor(hash2(gx - k, gy + k, 9) * CFG.starFrames)
+                  + lerp(CFG.twinkleMin, CFG.twinkleMax, hash2(gx, gy + k, 10))
+        });
+      }
+    }
+  }
+}
+
 function setupStars() {
   starTypes = [];
   for (var i = 0; i < __STAR_FILES__.length; i++) starTypes.push(i);
@@ -169,6 +194,7 @@ function resize() {
   pixelRatio = lerp(0.125, pixelRatioBasis * 3.0, CFG.interfaceScale);   // orbiterAndPlanetRatio
   planetRatio = pixelRatio * CFG.planetScale;                            // planet + clouds
   view = { w: W / pixelRatio, h: H / pixelRatio };                       // view units, y up
+  buildStarField();                                                     // regenerate for this view
 }
 
 // ---- drawing helpers (engine space is y-up; canvas is y-down) --------------------------------
@@ -190,43 +216,31 @@ function drawSky() {
 // renderStars(): the field is queried over a view rect padded by screenBuffer and rotated by
 // -starRotation; each star is then drawn rotated by +starRotation about the view centre. Net effect
 // for a star with field position p: rotate(p - fieldOrigin, starRotation, viewCentre).
+// Positions are kept FRACTIONAL like the engine's Vec2F glyph positions (no rounding): at 60 fps a
+// subpixel position is what makes a slow drift glide instead of stepping.
 function drawStars(t, starRotation) {
   var cos = Math.cos(starRotation), sin = Math.sin(starRotation);
   var cx = view.w / 2, cy = view.h / 2;
-  var cell = CFG.starCellSize;
-  var reach = Math.sqrt(view.w * view.w + view.h * view.h) / 2 + cell * 2;
-  var cells = Math.ceil(reach / cell);
-  var twinkle = CFG.twinkleMax;
-  var density = CFG.starCellCount;
+  var frames = CFG.starFrames;
+  ctx.imageSmoothingEnabled = true;                 // subpixel star sprites
+  for (var i = 0; i < starField.length; i++) {
+    var s = starField[i];
+    var sx = cx + s.x * cos - s.y * sin;
+    var sy = cy + s.x * sin + s.y * cos;
+    if (sx < -8 || sx > view.w + 8 || sy < -8 || sy > view.h + 8) continue;
 
-  for (var gy = -cells; gy <= cells; gy++) {
-    for (var gx = -cells; gx <= cells; gx++) {
-      var baseX = gx * cell, baseY = gy * cell;
-      for (var k = 0; k < density; k++) {
-        var rx = hash2(gx * 31 + k, gy * 17 + k, 5);
-        var ry = hash2(gx * 13 + k, gy * 29 + k, 6);
-        // field position, relative to the view centre (starOffset is 0 on the title screen)
-        var fx = baseX + rx * cell, fy = baseY + ry * cell;
-        var sx = cx + fx * cos - fy * sin;
-        var sy = cy + fx * sin + fy * cos;
-        if (sx < -8 || sx > view.w + 8 || sy < -8 || sy > view.h + 8) continue;
-
-        var type = Math.floor(hash2(gx + k, gy - k, 8) * starSheets.length);
-        var offset = Math.floor(hash2(gx - k, gy + k, 9) * CFG.starFrames) + lerp(CFG.twinkleMin, twinkle,
-                                                                                 hash2(gx, gy + k, 10));
-        var frame = Math.floor(t + offset) % CFG.starFrames;
-        var size = starFrameSize[type];
-        var px = sx * pixelRatio, py = sy * pixelRatio;   // screen px
-        if (size) {
-          ctx.drawImage(starSheets[type], frame * size[0], 0, size[0], size[1],
-                        Math.round(px - size[0] / 2), Math.round(H - py - size[1] / 2), size[0], size[1]);
-        } else {
-          dot(px, py, 1, 'rgba(255,255,255,0.9)');
-        }
-        window.__lwStarDrawn = (window.__lwStarDrawn || 0) + 1;
-      }
+    var frame = Math.floor(t + s.offset) % frames;   // engine: (size_t)(epochTime + offset) % frames
+    var size = starFrameSize[s.type];
+    var px = sx * pixelRatio, py = sy * pixelRatio;  // screen px, still fractional
+    if (size) {
+      ctx.drawImage(starSheets[s.type], frame * size[0], 0, size[0], size[1],
+                    px - size[0] / 2, H - py - size[1] / 2, size[0], size[1]);
+    } else {
+      dot(px, py, 1, 'rgba(255,255,255,0.9)');
     }
+    window.__lwStarDrawn = (window.__lwStarDrawn || 0) + 1;
   }
+  ctx.imageSmoothingEnabled = false;
 }
 
 function drawPlanet() {
@@ -317,6 +331,9 @@ function start() {
       starsDrawn: window.__lwStarCount || 0,
       clouds: clouds.length,
       cloudsDrawn: window.__lwCloudsDrawn || 0,
+      frameMs: (window.__lwFrameStats ? window.__lwFrameStats().medianMs : null),
+      fps: (window.__lwFrameStats ? window.__lwFrameStats().fps : null),
+      frames: (window.__lwFrameStats ? window.__lwFrameStats().frames : null),
       cloudState: cloudImages.map(function (i) { return (i.complete ? 'done' : 'loading') + ':' + i.naturalWidth; }).join(' '),
       horizonWidth: horizonImage.naturalWidth,
       starWidths: starSheets.map(function (i) { return i.naturalWidth; }).join(','),
@@ -327,20 +344,59 @@ function start() {
 
   function currentSeconds() { return (Date.now() - EPOCH_BASE) / 1000; }
 
+  var forcedValue = forced !== null ? parseFloat(forced) : null;
+
+  // ?t= renders a fixed moment for the tests. Keep redrawing it: sprites load asynchronously, so a
+  // single early draw would capture an empty scene.
   if (reduceMotion) {
-    frame(forced !== null ? parseFloat(forced) : 0);
+    var stillTime = forcedValue !== null ? forcedValue : currentSeconds();
+    frame(stillTime);
+    setInterval(function () { frame(stillTime); }, 250);
     return;
   }
-  var lastDraw = -1000;
+
+  // -------------------------------------------------------------------------------------------
+  // The game's loop, which is where the smoothness comes from:
+  //   * TickRateApproacher(60.0) -- the sky is advanced in FIXED 1/60 s steps, not by whatever the
+  //     frame delta happened to be, and the ticker catches up if a frame ran long.
+  //   * VSync presentation -- one drawn frame per display refresh.
+  //   * Sky::m_time += dt -- a monotonic double accumulator, never a wall-clock lookup, so external
+  //     clock changes cannot make the scene jump.
+  // Everything drawn is then a pure linear function of that time (no easing, no keyframes, no
+  // restarts), which is what makes it read as perfectly smooth rather than "animated".
+  // -------------------------------------------------------------------------------------------
+  var STEP = 1 / 60;
+  var skyTime = currentSeconds();              // absolute phase: a reload continues where it was
+  var lastNow = performance.now();
+  var accumulator = 0;
+  var frameDeltas = [];
+  var drawnFrames = 0;
+
   (function loop(now) {
-    // ~30 fps: this sky moves slowly, and halving the redraw rate halves the load on the WebKit
-    // content process (which is what macOS may otherwise suspend or kill)
-    if (forced !== null || now - lastDraw >= 32) {
-      lastDraw = now;
-      frame(forced !== null ? parseFloat(forced) : currentSeconds());
+    var delta = (now - lastNow) / 1000;
+    lastNow = now;
+    if (delta > 0.25 || delta < 0) {           // after display sleep/suspend: resume, don't fast-forward
+      delta = STEP;
+      accumulator = 0;
     }
+    accumulator += delta;
+    var steps = 0;
+    while (accumulator >= STEP && steps < 60) { skyTime += STEP; accumulator -= STEP; steps++; }
+    if (frameDeltas.length < 240) frameDeltas.push(delta * 1000);
+    drawnFrames++;
+    frame(forcedValue !== null ? forcedValue : skyTime);
+    window.__lwFrameStats = function () {
+      var sorted = frameDeltas.slice().sort(function (a, b) { return a - b; });
+      var median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+      return {
+        frames: drawnFrames,
+        medianMs: Math.round(median * 100) / 100,
+        p95Ms: sorted.length ? Math.round(sorted[Math.floor(sorted.length * 0.95)] * 100) / 100 : 0,
+        fps: median > 0 ? Math.round(1000 / median) : 0
+      };
+    };
     requestAnimationFrame(loop);
-  })(0);
+  })(lastNow);
 }
 
 start();
