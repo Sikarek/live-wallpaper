@@ -56,6 +56,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             forName: Notification.Name("com.sikarek.livewallpaper.ping"), object: nil, queue: .main
         ) { [weak self] _ in self?.showWindow(nil) }
 
+        // The Composer posts these after it writes a combination into the wallpaper library: one says
+        // "rescan your library", the other also means "put it on screen" (its Export & Use Now).
+        // Without these the exported wallpaper would only appear after a manual reload.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.sikarek.livewallpaper.refresh"), object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.model.refresh(keepSelection: true)
+            self.model.status = "Composer exported a wallpaper — library reloaded"
+            NSLog("LIVEWALLPAPER composer refresh: library now holds \(self.model.wallpapers.count) wallpapers")
+        }
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.sikarek.livewallpaper.apply"), object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.model.refresh(keepSelection: true)
+            if let selected = Prefs.selected, self.model.wallpapers.contains(where: { $0.name == selected }) {
+                self.model.selectedName = selected
+            }
+            self.applyPlan()
+            self.model.status = "Applied the wallpaper the Composer exported"
+            NSLog("LIVEWALLPAPER composer apply: now showing \(Prefs.selected ?? "<none>") on \(NSScreen.screens.count) display(s)")
+        }
+
         wireModel()
         buildStatusItem()
         watchLockForAerialFreeze()

@@ -36,7 +36,9 @@ Where this comes from (all of it is the retail game's own data):
 Append ?t=<seconds> to the page URL to render a fixed moment (used by the tests).
 """
 import argparse
+import json as _json
 import os
+import random as _random
 import subprocess
 import sys
 
@@ -59,6 +61,26 @@ CLOUD_RADIUS = (740, 810)
 CLOUD_SPEED = (0.2, 0.3)
 CLOUD_SHEETS = ["cloud2", "cloud3", "cloud4"]
 DEFAULT_MASKS = ["6", "11", "17"]     # celestial.config: maskPerPlanetRange [3, 3]
+
+# Sky orbiters (the moons and the parent planet) — all from /sky.config + /celestial.config:
+#   satellite.planetScale 3.0 / moonScale 1.5 / area [400,400]
+#   a world's disc art is /celestial/system/terrestrial/biomes/<biome>/maskie<N>.png, 542x542 (measured),
+#   stacked <baseCount>..1 and shaded by /celestial/system/terrestrial/shadows/<num>.png (shadowNumber 1-9)
+#   the disc's on-screen size is texSize * imageScale * orbiterScale * pixelRatio, where imageScale comes
+#   from the world's planetaryType (celestial.config planetaryTypes: Moon 0.125, terrestrial tiers 0.1/0.125)
+DISC_DIR = "/celestial/system/terrestrial/biomes"
+DISC_SHADOW_DIR = "/celestial/system/terrestrial/shadows"
+DISC_LIQUID_DIR = "/celestial/system/terrestrial/liquids"
+SATELLITE_AREA = (400.0, 400.0)       # sky.config satellite.area (view units)
+MOON_SCALE = 1.5                      # sky.config satellite.moonScale
+PARENT_SCALE = 3.0                    # sky.config satellite.planetScale
+SHADOW_NUMBERS = 9                    # terrestrialGraphics.shadowNumber [1,9]
+BASE_COUNT = {"garden": 5, "savannah": 4, "snow": 4, "toxic": 2}   # terrestrialGraphics baseCount
+IMAGE_SCALE = {"moon": 0.125, "barren": 0.1}                       # planetaryTypes variationParameters
+DEFAULT_IMAGE_SCALE = 0.1125          # terrestrial tiers 1-6 (0.1 / 0.125)
+DISC_BIOMES = ["alien", "arctic", "barren", "desert", "forest", "garden", "jungle", "magma", "midnight",
+               "moon", "ocean", "savannah", "scorchedcity", "snow", "toxic", "tundra", "volcanic"]
+LIQUIDS = ["water", "lava", "poison", "swampwater", "tarliquid", "tentaclejuice"]
 
 HTML = """<!doctype html>
 <html lang="en">
@@ -95,7 +117,11 @@ var CFG = {
   cloudRadius: [__CLOUD_R_MIN__, __CLOUD_R_MAX__],
   cloudSpeed: [__CLOUD_S_MIN__, __CLOUD_S_MAX__],
   darken: __DARKEN__,                 // title.config skyBackdropDarken alpha / 255
-  cloudAlpha: __CLOUD_ALPHA__         // 1.0 = the engine's alpha; the sprites are very faint
+  cloudAlpha: __CLOUD_ALPHA__,        // 1.0 = the engine's alpha; the sprites are very faint
+  orbiters: __ORBITERS__,             // sky moons + the parent planet, one entry per disc
+  satelliteArea: [__AREA_W__, __AREA_H__],   // sky.config satellite.area
+  imageScale: __IMAGE_SCALES__,       // per world type (celestial.config planetaryTypes)
+  hueShift: __HUE_SHIFT__             // the biome's hueShift in degrees (0 = untouched)
 };
 
 var canvas = document.getElementById('sky');
@@ -106,9 +132,18 @@ var EPOCH_BASE = 1735689600000;
 var W = 0, H = 0, DPR = 1;
 var planetRatio = 1, pixelRatio = 1, view = { w: 0, h: 0 };
 var horizonImage = new Image();
-var cloudImages = [], starSheets = [], starFrameSize = [];
+var cloudImages = [], starSheets = [], starFrameSize = [], orbiterImages = [];
 var clouds = [], starTypes = [], starField = [];
 var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+// A web view that is not on screen (an offscreen preview, a hidden window, a test) never gets
+// requestAnimationFrame callbacks, so the first frame would be drawn before the sprites finish loading
+// and then never again. Redraw once whenever an image arrives, and remember the clock for it.
+var started = false, forcedValue = null, lastSeconds = 0;
+
+function scheduleRedraw() {
+  if (!started) return;
+  setTimeout(function () { frame(forcedValue !== null ? forcedValue : lastSeconds); }, 0);
+}
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 
@@ -125,16 +160,25 @@ function hash2(x, y, salt) {
 }
 
 function setupSprites() {
+  horizonImage.onload = scheduleRedraw;
   horizonImage.src = 'assets/horizon.png';
+  for (var i = 0; i < __ORBITER_FILES__.length; i++) {
+    var o = new Image(); o.onload = scheduleRedraw;
+    o.src = 'assets/' + __ORBITER_FILES__[i]; orbiterImages.push(o);
+  }
   for (var i = 0; i < __CLOUD_FILES__.length; i++) {
-    var c = new Image(); c.src = 'assets/' + __CLOUD_FILES__[i]; cloudImages.push(c);
+    var c = new Image(); c.onload = scheduleRedraw;
+    c.src = 'assets/' + __CLOUD_FILES__[i]; cloudImages.push(c);
   }
   for (var s = 0; s < __STAR_FILES__.length; s++) {
     var img = new Image(); img.src = 'assets/' + __STAR_FILES__[s];
     starSheets.push(img);
     starFrameSize.push(null);           // measured once the sheet loads
     img.onload = (function (index, image) {
-      return function () { starFrameSize[index] = [image.width / CFG.starFrames, image.height]; };
+      return function () {
+        starFrameSize[index] = [image.width / CFG.starFrames, image.height];
+        scheduleRedraw();
+      };
     })(s, img);
   }
 }
@@ -247,11 +291,46 @@ function drawStars(t, starRotation) {
   ctx.imageSmoothingEnabled = false;
 }
 
+// backOrbiters() (StarSkyRenderData.cpp:34-48): every moon and the parent planet is a disc whose
+// position is (unit random * satellite.area), ROTATED WITH THE SKY about (viewW/2, 0) — the centre of
+// the BOTTOM EDGE, not the planet centre the clouds orbit (that one sits 700 units below). The painter
+// draws each disc centred on its position (RectF::withCenter) at texSize*scale*pixelRatio.
+function drawOrbiters(starRotation) {
+  window.__lwOrbitersDrawn = 0;
+  window.__lwOrbiterInfo = [];
+  if (!CFG.orbiters.length) return;
+  var cos = Math.cos(starRotation), sin = Math.sin(starRotation);
+  var cx = view.w / 2, cy = 0;
+  var drawn = 0;
+  for (var i = 0; i < CFG.orbiters.length; i++) {
+    var o = CFG.orbiters[i];
+    var img = orbiterImages[i];
+    if (!img || !img.complete || !img.naturalWidth) continue;
+    var dx = o.x * CFG.satelliteArea[0] - cx;
+    var dy = o.y * CFG.satelliteArea[1] - cy;
+    var x = cx + dx * cos - dy * sin;
+    var y = cy + dx * sin + dy * cos;
+    var scale = o.scale * (CFG.imageScale[o.type] || 0.1125) * pixelRatio;
+    var w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+    var px = x * pixelRatio, py = y * pixelRatio;      // px from the bottom edge
+    if (px + w / 2 < 0 || px - w / 2 > W) continue;    // off-screen sideways
+    if (py + h / 2 < 0 || py - h / 2 > H) continue;    // fully below the bottom edge / above the top
+    image(px - w / 2, py - h / 2, w, h, img);
+    drawn++;
+    window.__lwOrbiterInfo.push({ type: o.type, x: Math.round(px), y: Math.round(py),
+                                  size: Math.round(w) });
+  }
+  window.__lwOrbitersDrawn = drawn;
+}
+
 function drawPlanet() {
   if (!horizonImage.complete || !horizonImage.naturalWidth) return;
   var w = horizonImage.naturalWidth * planetRatio;
   var h = horizonImage.naturalHeight * planetRatio;
+  // the engine's biome hueShift rides on the base image (celestial.config: "?hueshift=")
+  if (CFG.hueShift) ctx.filter = 'hue-rotate(' + CFG.hueShift + 'deg)';
   image((W - w) / 2, 0, w, h, horizonImage);        // centred on the view, sitting on the bottom edge
+  ctx.filter = 'none';
 }
 
 // frontOrbiters(): clouds orbit the planet centre, which sits BELOW the bottom edge
@@ -292,6 +371,8 @@ function drawDarken() {
 function frame(seconds) {
   if (typeof frame.count !== 'number') frame.count = 0;
   frame.count++;
+  lastSeconds = seconds;
+  started = true;
   var day = seconds % CFG.dayLength;
   var starRotation = 2 * Math.PI * day / CFG.dayLength;    // StarSky.cpp:204 (2pi wrap is seamless
                                                            // for a random field, so no jump)
@@ -303,6 +384,7 @@ function frame(seconds) {
   window.__lwStarDrawn = 0;
   drawSky();
   drawStars(t, starRotation);
+  drawOrbiters(starRotation);                        // engine order: stars -> debris -> back orbiters
   drawPlanet();
   drawClouds(orbitAngle);
   drawDarken();
@@ -335,6 +417,8 @@ function start() {
       starsDrawn: window.__lwStarCount || 0,
       clouds: clouds.length,
       cloudsDrawn: window.__lwCloudsDrawn || 0,
+      orbiters: window.__lwOrbiterInfo || [],
+      orbitersDrawn: window.__lwOrbitersDrawn || 0,
       frameMs: (window.__lwFrameStats ? window.__lwFrameStats().medianMs : null),
       fps: (window.__lwFrameStats ? window.__lwFrameStats().fps : null),
       frames: (window.__lwFrameStats ? window.__lwFrameStats().frames : null),
@@ -348,7 +432,8 @@ function start() {
 
   function currentSeconds() { return (Date.now() - EPOCH_BASE) / 1000; }
 
-  var forcedValue = forced !== null ? parseFloat(forced) : null;
+  forcedValue = forced !== null ? parseFloat(forced) : null;   // module-level: scheduleRedraw needs it
+  started = true;            // from here on, a late-loading sprite triggers a redraw
 
   // ?t= renders a fixed moment for the tests. Keep redrawing it: sprites load asynchronously, so a
   // single early draw would capture an empty scene.
@@ -410,14 +495,31 @@ start();
 """
 
 
+def png_size(path):
+    """(w, h) straight from the PNG header — the disc art's size decides the canvas here."""
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if head[:8] != b"\x89PNG\r\n\x1a\n":
+        sys.exit(f"not a PNG: {path}")
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
 def ensure_compositor():
-    """Compile tools/composite_pngs.swift on first use (swiftc ships with the Command Line Tools)."""
+    """Compile tools/composite_pngs.swift on first use (swiftc ships with the Command Line Tools).
+
+    LW_COMPOSITOR points at a prebuilt binary — an app bundle ships one, so nothing is compiled and the
+    bundle can stay read-only."""
+    prebuilt = os.environ.get("LW_COMPOSITOR")
+    if prebuilt:
+        if os.path.exists(prebuilt):
+            return prebuilt
+        sys.exit(f"LW_COMPOSITOR is set to {prebuilt} but there is nothing there")
     here = os.path.dirname(os.path.abspath(__file__))
-    root = os.path.dirname(here)
-    binary = os.path.join(root, "build", "composite_pngs")
+    cache = os.path.expanduser("~/Library/Caches/LiveWallpaper")
+    binary = os.path.join(cache, "composite_pngs")
     source = os.path.join(here, "composite_pngs.swift")
     if not os.path.exists(binary) or os.path.getmtime(binary) < os.path.getmtime(source):
-        os.makedirs(os.path.dirname(binary), exist_ok=True)
+        os.makedirs(cache, exist_ok=True)
         result = subprocess.run(["swiftc", "-O", "-o", binary, source], capture_output=True, text=True)
         if result.returncode != 0:
             sys.exit("could not build composite_pngs:\n" + result.stderr)
@@ -446,7 +548,46 @@ def main():
     ap.add_argument("--cloud-alpha", type=float, default=3.0,
                     help="cloud opacity multiplier: the sprites peak at ~7%% alpha, 3.0 makes the "
                          "wisps read on the dark backdrop (1.0 = engine alpha)")
+    ap.add_argument("--moons", type=int, default=0, choices=[0, 1, 2, 3],
+                    help="how many moons share the sky (the engine draws every sibling satellite)")
+    ap.add_argument("--moon-types", default="",
+                    help="comma list of biome names for the moons, e.g. moon,tundra,barren "
+                         "(default: picked from the seed)")
+    ap.add_argument("--parent-planet", default="none",
+                    help="draw the planet you orbit in the sky (the engine does this when the world "
+                         "is a moon): any biome name, or none")
+    ap.add_argument("--moon-size", type=float, default=1.0,
+                    help="multiplier on the engine's moonScale (scene units, default 1.0)")
+    ap.add_argument("--planet-size", type=float, default=1.0,
+                    help="multiplier on the engine's planetScale")
+    ap.add_argument("--disc-shadow", type=int, default=0,
+                    help="which shadow sprite (1-9) the moon/planet discs use; 0 = from the seed")
+    ap.add_argument("--liquid", default="none",
+                    help="surface liquid as the horizon's base image: " + ", ".join(LIQUIDS) + ", or none")
+    ap.add_argument("--hue-shift", type=float, default=0.0,
+                    help="hue rotation in degrees applied to the base image (the engine's biome hueShift)")
+    ap.add_argument("--dump-options", action="store_true",
+                    help="print the palette of choices as JSON (the Composer app builds its pickers "
+                         "from this, so the two can never drift apart) and exit")
     args = ap.parse_args()
+
+    if args.dump_options:
+        print(_json.dumps({
+            "planets": DISC_BIOMES,
+            "liquids": LIQUIDS,
+            "masks": list(range(1, 26)),
+            "maskPerPlanet": {"garden": [3, 3], "forest": [3, 3], "savannah": [3, 3], "jungle": [3, 3],
+                              "alien": [3, 3], "volcanic": [3, 3], "scorchedcity": [2, 3], "toxic": [2, 2],
+                              "ocean": [1, 2], "arctic": [1, 2], "magma": [1, 2]},
+            "shadows": list(range(1, SHADOW_NUMBERS + 1)),
+            "moonScale": MOON_SCALE, "planetScale": PARENT_SCALE,
+            "imageScale": {**{"default": DEFAULT_IMAGE_SCALE}, **IMAGE_SCALE},
+            "satelliteArea": list(SATELLITE_AREA),
+            "defaults": {"planet": "garden", "masks": [int(m) for m in DEFAULT_MASKS], "maskAlpha": 0.18,
+                         "dayLength": 600.0, "cloudAlpha": 3.0, "starsPerCell": STAR_CELL_COUNT,
+                         "seed": 1234567},
+        }, indent=2))
+        return
 
     out = os.path.expanduser(args.out)
     assets = os.path.join(out, "assets")
@@ -454,6 +595,37 @@ def main():
 
     masks = [m.strip() for m in args.masks.split(",") if m.strip()]
     mask_dir = "temperate"
+    liquid = args.liquid if args.liquid in LIQUIDS else None
+
+    # ---- the sky's other bodies: the moons and (optionally) the planet we orbit ------------------
+    rng = _random.Random(args.seed)
+    orbiters = []
+    if args.parent_planet and args.parent_planet != "none":
+        if args.parent_planet not in DISC_BIOMES:
+            sys.exit(f"unknown --parent-planet {args.parent_planet!r}; pick one of: {', '.join(DISC_BIOMES)}")
+        orbiters.append({"type": args.parent_planet, "scale": round(PARENT_SCALE * args.planet_size, 4),
+                         "parent": True})
+    moon_types = [t.strip() for t in args.moon_types.split(",") if t.strip()]
+    for i in range(args.moons):
+        t = moon_types[i] if i < len(moon_types) else rng.choice(DISC_BIOMES)
+        if t not in DISC_BIOMES:
+            sys.exit(f"unknown moon type {t!r}; pick one of: {', '.join(DISC_BIOMES)}")
+        orbiters.append({"type": t, "scale": round(MOON_SCALE * args.moon_size, 4), "parent": False})
+    disc_sources = []          # (pak path, local path) pairs for the compositor's inputs
+    for i, orbiter in enumerate(orbiters):
+        orbiter["x"] = round(rng.random(), 6)          # unit random x satellite.area, like the engine
+        orbiter["y"] = round(rng.random(), 6)
+        orbiter["image"] = f"disc{i}.png"
+        shadow = args.disc_shadow or rng.randint(1, SHADOW_NUMBERS)
+        stack = []
+        if liquid:
+            stack.append(f"{DISC_LIQUID_DIR}/{liquid}.png")
+        for n in range(BASE_COUNT.get(orbiter["type"], 3), 0, -1):
+            stack.append(f"{DISC_DIR}/{orbiter['type']}/maskie{n}.png")
+        stack.append(f"{DISC_SHADOW_DIR}/{shadow}.png")
+        orbiter["stack"] = [os.path.join(f"discsrc{i}", os.path.basename(p)) for p in stack]
+        for p, local in zip(stack, orbiter["stack"]):
+            disc_sources.append((p, local))
 
     wanted = [
         (f"{HORIZON}/textures/{args.planet}_l.png", f"{args.planet}_l.png"),
@@ -463,6 +635,10 @@ def main():
         (f"{HORIZON}/shadow/shadow_l.png", "shadow_l.png"),
         (f"{HORIZON}/shadow/shadow_r.png", "shadow_r.png"),
     ]
+    if liquid:
+        wanted.append((f"{HORIZON}/liquids/{liquid}_l.png", "liquid_l.png"))
+        wanted.append((f"{HORIZON}/liquids/{liquid}_r.png", "liquid_r.png"))
+    wanted += disc_sources
     for m in masks:
         wanted.append((f"{HORIZON}/masks/{mask_dir}/{m}_l.png", f"mask{m}_l.png"))
         wanted.append((f"{HORIZON}/masks/{mask_dir}/{m}_r.png", f"mask{m}_r.png"))
@@ -480,16 +656,19 @@ def main():
                 sys.exit(f"asset missing from this Starbound build: {pak_path}")
             off, size = by_path[pak_path]
             f.seek(off)
-            with open(os.path.join(assets, local), "wb") as g:
+            dest = os.path.join(assets, local)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as g:
                 g.write(f.read(size))
-    print(f"# extracted {len(wanted)} assets ({len(STAR_SHEETS)} star sheets, {len(CLOUD_SHEETS)} clouds)")
+    print(f"# extracted {len(wanted)} assets ({len(STAR_SHEETS)} star sheets, {len(CLOUD_SHEETS)} clouds, "
+          f"{len(orbiters)} disc stack(s))")
 
     # Composite the celestial stack the way the engine does: base halves, masks CLIPPED to the planet
     # (sourceAtop), shadow pass, then the atmosphere.
     compositor = ensure_compositor()
     horizon = os.path.join(assets, "horizon.png")
-    cmd = [compositor, horizon, "1764", "202",
-           "--planet", f"{args.planet}_l.png", f"{args.planet}_r.png"]
+    base_pair = ("liquid_l.png", "liquid_r.png") if liquid else (f"{args.planet}_l.png", f"{args.planet}_r.png")
+    cmd = [compositor, horizon, "1764", "202", "--planet", base_pair[0], base_pair[1]]
     if args.shade:
         cmd += ["--multiply", "0.45", "shadow_l.png", "shadow_r.png"]
     mask_files = []
@@ -499,6 +678,14 @@ def main():
         cmd += ["--atop", str(args.mask_alpha)] + mask_files
     cmd += ["--screen", "atmosphere_l.png", "atmosphere_r.png"]
     print("  " + subprocess.run(cmd, capture_output=True, text=True, cwd=assets).stdout.strip())
+
+    # Composite each sky body the way drawWorld() stacks it: the disc art <baseCount>..1, then the
+    # shadow sprite on top. All layers are the same 542x542 texture, so they draw at the same rect.
+    for orbiter in orbiters:
+        size = png_size(os.path.join(assets, orbiter["stack"][0]))
+        cmd = [compositor, os.path.join(assets, orbiter["image"]), str(size[0]), str(size[1]),
+               "--stack"] + orbiter["stack"]
+        print("  " + subprocess.run(cmd, capture_output=True, text=True, cwd=assets).stdout.strip())
 
     html = (HTML
             .replace("__DAYLENGTH__", str(args.day_length))
@@ -520,14 +707,38 @@ def main():
             .replace("__DARKEN__", "0.39")
             .replace("__CLOUD_ALPHA__", str(args.cloud_alpha))
             .replace("__SEED__", str(args.seed))
+            .replace("__ORBITERS__", _json.dumps([{"x": o["x"], "y": o["y"], "type": o["type"],
+                                                   "scale": o["scale"]} for o in orbiters]))
+            .replace("__AREA_W__", str(SATELLITE_AREA[0])).replace("__AREA_H__", str(SATELLITE_AREA[1]))
+            .replace("__IMAGE_SCALES__", _json.dumps({**{"default": DEFAULT_IMAGE_SCALE}, **IMAGE_SCALE}))
+            .replace("__HUE_SHIFT__", str(args.hue_shift))
+            .replace("__ORBITER_FILES__", repr([o["image"] for o in orbiters]))
             .replace("__CLOUD_FILES__", repr([f"{c}.png" for c in CLOUD_SHEETS]))
             .replace("__STAR_FILES__", repr([f"stars/{s}_star.png" for s in STAR_SHEETS])))
 
     index = os.path.join(out, "index.html")
     with open(index, "w") as g:
         g.write(html)
+
+    # The wallpaper documents how it was made: the Composer reads nothing from this, the tests do, and
+    # it is what tells you (months later) which moons and which masks produced a look you liked.
+    plan = {
+        "generator": "starbound_mainmenu.py",
+        "planet": args.planet, "masks": masks, "maskAlpha": args.mask_alpha, "shade": bool(args.shade),
+        "liquid": liquid, "hueShift": args.hue_shift, "dayLength": args.day_length,
+        "cloudAlpha": args.cloud_alpha, "starsPerCell": args.stars_per_cell, "seed": args.seed,
+        "interfaceScale": args.interface_scale,
+        "engine": {"satelliteArea": list(SATELLITE_AREA), "moonScale": args.moon_size * MOON_SCALE,
+                   "planetScale": args.planet_size * PARENT_SCALE,
+                   "imageScale": {**{"default": DEFAULT_IMAGE_SCALE}, **IMAGE_SCALE}},
+        "orbiters": [{"x": o["x"], "y": o["y"], "type": o["type"], "scale": o["scale"],
+                      "image": o["image"]} for o in orbiters],
+    }
+    with open(os.path.join(out, "backdrop.json"), "w") as g:
+        _json.dump(plan, g, indent=2)
     print(f"# wallpaper written: {index}")
-    print(f"# planet={args.planet} masks={masks} dayLength={args.day_length}s stars/cell={args.stars_per_cell}")
+    print(f"# planet={args.planet} masks={masks} dayLength={args.day_length}s stars/cell={args.stars_per_cell} "
+          f"moons={args.moons} parent={args.parent_planet}")
 
 
 if __name__ == "__main__":

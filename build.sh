@@ -68,6 +68,10 @@ echo "    app binary: $(ls -l "$MACOS_DIR/$APP_NAME" | awk '{print $5}') bytes"
 swiftc -O -o "$BUILD_DIR/mkloop" tools/mkloop.swift
 echo "    helper: build/mkloop"
 
+# the CoreGraphics compositor (also bundled into the Composer app)
+swiftc -O -o "$BUILD_DIR/composite_pngs" tools/composite_pngs.swift
+echo "    helper: build/composite_pngs"
+
 # Lock Screen tooling: render the scene to a looping video, inspect video files
 swiftc -O -o "$BUILD_DIR/rendertitle" tools/rendertitle.swift
 swiftc -O -o "$BUILD_DIR/probe_video" tools/probe_video.swift
@@ -76,6 +80,10 @@ echo "    tools: build/rendertitle, build/probe_video"
 # the CLI variant: same engine, no menu bar — handy for scripting and for testing
 swiftc -O -o "$BUILD_DIR/wphost" Sources/wphost-cli.swift
 echo "    cli: build/wphost"
+
+# post the app's distributed notifications from a script (the Composer does this itself after export)
+swiftc -O -o "$BUILD_DIR/lwpost" tools/lwpost.swift
+echo "    helper: build/lwpost"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -115,6 +123,74 @@ fi
 codesign --verify --verbose=1 "$APP" 2>&1 | sed 's/^/    /' || true
 
 echo "==> done: $APP"
+
+# ------------------------------------------------------------------------------------------------
+# Starbound Composer — a second, independent app: choose a combination of the game's own celestial art,
+# see it live, and export it into the wallpaper library. It bundles tools/starbound_mainmenu.py and
+# drives it, so the preview and the exported wallpaper come from one renderer (no second implementation
+# to drift out of sync), and the combo palette always matches the tool that draws it.
+# ------------------------------------------------------------------------------------------------
+COMPOSER_NAME="StarboundComposer"
+COMPOSER_BUNDLE_ID="com.sikarek.starbound-composer"
+COMPOSER_VERSION="1.0"
+COMPOSER_APP="$BUILD_DIR/$COMPOSER_NAME.app"
+COMPOSER_MACOS="$COMPOSER_APP/Contents/MacOS"
+COMPOSER_RESOURCES="$COMPOSER_APP/Contents/Resources/tools"
+
+echo "==> building $COMPOSER_NAME $COMPOSER_VERSION"
+rm -rf "$COMPOSER_APP"
+mkdir -p "$COMPOSER_MACOS" "$COMPOSER_RESOURCES"
+swiftc -O -o "$COMPOSER_MACOS/$COMPOSER_NAME" \
+  Sources/composer/main.swift \
+  Sources/composer/ComposerModel.swift \
+  Sources/composer/ComposerPreview.swift \
+  Sources/composer/ComposerUI.swift \
+  Sources/composer/ComposerSelfTest.swift
+echo "    app binary: $(ls -l "$COMPOSER_MACOS/$COMPOSER_NAME" | awk '{print $5}') bytes"
+cp -f tools/starbound_mainmenu.py tools/starbound_unpack.py "$COMPOSER_RESOURCES/"
+cp -f "$BUILD_DIR/composite_pngs" "$COMPOSER_RESOURCES/"       # prebuilt: nothing is compiled at runtime
+echo "    bundled tools: $(ls "$COMPOSER_RESOURCES" | tr '\n' ' ')"
+
+cat > "$COMPOSER_APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+        <key>CFBundleName</key>                     <string>$COMPOSER_NAME</string>
+        <key>CFBundleDisplayName</key>              <string>Starbound Composer</string>
+        <key>CFBundleIdentifier</key>               <string>$COMPOSER_BUNDLE_ID</string>
+        <key>CFBundleExecutable</key>               <string>$COMPOSER_NAME</string>
+        <key>CFBundlePackageType</key>              <string>APPL</string>
+        <key>CFBundleShortVersionString</key>       <string>$COMPOSER_VERSION</string>
+        <key>CFBundleVersion</key>                  <string>$COMPOSER_VERSION</string>
+        <key>LSMinimumSystemVersion</key>           <string>13.0</string>
+        <key>NSHighResolutionCapable</key>          <true/>
+</dict>
+</plist>
+PLIST
+
+printf 'APPL????' > "$COMPOSER_APP/Contents/PkgInfo"
+
+echo "==> signing $COMPOSER_NAME"
+if [ -n "${SIGN_ID:-}" ]; then
+  codesign --force --options runtime --timestamp=none --sign "$SIGN_ID" "$COMPOSER_APP" 2>&1 | sed 's/^/    /'
+else
+  codesign --force --sign - --timestamp=none "$COMPOSER_APP" 2>&1 | sed 's/^/    /'
+fi
+codesign --verify --verbose=1 "$COMPOSER_APP" 2>&1 | sed 's/^/    /' || true
+echo "==> done: $COMPOSER_APP"
+
+if [ "${1:-}" = "--install" ]; then
+  DEST="${2:-$HOME/Applications}"
+  mkdir -p "$DEST"
+  rm -rf "$DEST/$COMPOSER_NAME.app"
+  cp -R "$COMPOSER_APP" "$DEST/"
+  cp -f support/StarboundComposer.command "$DEST/" && chmod +x "$DEST/StarboundComposer.command"
+  echo "==> installed: $DEST/$COMPOSER_NAME.app"
+  echo "    also:      $DEST/StarboundComposer.command  (double-click this if the .app refuses to open)"
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -f "$DEST/$COMPOSER_NAME.app" >/dev/null 2>&1 || true
+fi
 
 if [ "${1:-}" = "--install" ]; then
   DEST="${2:-$HOME/Applications}"

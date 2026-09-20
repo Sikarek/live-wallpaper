@@ -27,6 +27,9 @@ struct Group {
     var mode: CGBlendMode
     var alpha: CGFloat
     var files: [String]
+    /// true: draw every file at the FULL canvas rect (stacked art, e.g. the 542x542 planet discs);
+    /// false: butt the files together horizontally, bottom-aligned (the horizon band's left/right halves).
+    var fullCanvas: Bool
 }
 var groups: [Group] = []
 var index = 4
@@ -45,17 +48,19 @@ while index < argv.count {
         index += 1
     }
     let mode: CGBlendMode
+    var full = false
     switch flag {
     case "--planet":   mode = .normal
     case "--atop":     mode = .sourceAtop
     case "--multiply": mode = .multiply
     case "--screen":   mode = .screen
     case "--over":     mode = .normal
+    case "--stack":    mode = .normal; full = true          // same-size art drawn on top of itself
     default:
         FileHandle.standardError.write("unknown flag \(flag)\n".data(using: .utf8)!)
         exit(2)
     }
-    groups.append(Group(mode: mode, alpha: alpha, files: files))
+    groups.append(Group(mode: mode, alpha: alpha, files: files, fullCanvas: full))
 }
 
 func load(_ path: String) -> CGImage {
@@ -75,6 +80,13 @@ guard let ctx = CGContext(data: nil, width: canvasW, height: canvasH, bitsPerCom
 for group in groups {
     ctx.setBlendMode(group.mode)
     ctx.setAlpha(group.alpha)
+    if group.fullCanvas {
+        for file in group.files {
+            let image = load(file)
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: canvasW, height: canvasH))
+        }
+        continue
+    }
     var x = 0
     let totalWidth = group.files.reduce(0) { $0 + load($1).width }   // pairs butt together
     let startX = (canvasW - totalWidth) / 2

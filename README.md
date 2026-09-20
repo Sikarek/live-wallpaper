@@ -254,6 +254,66 @@ python3 tools/starbound_mainmenu.py --cloud-alpha 1.0     # literal engine alpha
 
 Measured: 82,989 px (5.6% of the frame) change across 36 degrees of star rotation.
 
+## Starbound Composer (build your own combination)
+
+`StarboundComposer.app` — built by the same `./build.sh` — is a window with every knob of the backdrop
+on the left and a live preview on the right: biome, surface liquid, masks, the moons that share the
+sky, the planet you orbit, cloud strength, star density, day length, seed. **Export** writes it into the
+wallpaper library; **Export & Use Now** also puts it on screen.
+
+It does not reimplement the backdrop: it bundles `tools/starbound_mainmenu.py` and drives it. The
+preview, the exported wallpaper and the command line therefore come out of one renderer, `--dump-options`
+feeds the app's pickers so the two can never drift apart, and every exported folder gets a
+`backdrop.json` recording the exact combination that produced it.
+
+What the game allows in that backdrop (from `/celestial.config`, `/sky.config` and the OpenStarbound
+sources):
+
+```
+19  planet art sets        horizon/textures/<biome>_l|r.png      (17 of them also have sky disc art)
+25  surface masks          maskRange [1,25]
+0-3 masks per planet       maskPerPlanetRange varies by biome (garden 3, scorchedcity 2-3, ocean 1-2)
+ 6  surface liquids        horizon/liquids/<liquid>_l|r.png
+ 9  disc shadows           shadows/<num>.png — moons and the parent planet pick one (shadowNumber [1,9])
+0-3 moons per world        satelliteProbability 0-0.5, maxSatelliteCount 1-3, satelliteTypes [Moon]
+17  parent planets         the engine draws the planet you orbit at satellite.planetScale 3.0
+ ∞  hue shift, clouds, stars   a continuous hue shift + layouts seeded from the world seed
+```
+
+That is 17,683 discrete horizon looks before the hue shift, and once the sky bodies and the seeded
+layouts are counted the space stops being countable — the Composer is a way to walk it, Randomise jumps
+somewhere new.
+
+Sky bodies follow the engine to the pixel: `position = (unit random × satellite.area)`, rotated with the
+sky about the centre of the **bottom edge**; `size = texture × imageScale × (moonScale 1.5 | planetScale
+3.0) × pixelRatio` (`StarSkyRenderData.cpp backOrbiters()`, `StarEnvironmentPainter.cpp drawOrbiter()`).
+
+```bash
+./build/StarboundComposer.app/Contents/MacOS/StarboundComposer --self-test          # 95 checks
+./build/StarboundComposer.app/Contents/MacOS/StarboundComposer --probe <folder> --query t=300
+```
+
+The self-test re-derives each body's position with a second implementation of the engine's maths and
+requires the page to agree exactly, so a slipped sign or a unit mix-up fails the build instead of
+quietly moving a moon.
+
+Everything the window does is scriptable, which is also how it gets tested:
+
+```bash
+# export a combination without opening the window (same code path as the Export button)
+./build/StarboundComposer.app/Contents/MacOS/StarboundComposer --export my-sky \
+    --planet midnight --liquid water --moons 3 --parent-planet ocean --seed 42 --use-now
+
+# what did a generated folder actually draw?
+./build/StarboundComposer.app/Contents/MacOS/StarboundComposer --probe <folder> --query t=300
+
+# the window itself: every control, with geometry (no screen-recording permission needed)
+./build/StarboundComposer.app/Contents/MacOS/StarboundComposer --dump-a11y
+
+# tell the wallpaper app to rescan / re-apply (what the Composer posts after an export)
+./build/lwpost refresh && ./build/lwpost apply
+```
+
 ## Lock Screen, and coming back after a restart
 
 macOS gives no API for custom live lock-screen content: the lock screen and the login window are drawn
