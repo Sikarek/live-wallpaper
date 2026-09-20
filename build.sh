@@ -23,7 +23,8 @@ echo "==> building $APP_NAME $VERSION"
 rm -rf "$APP"
 mkdir -p "$MACOS_DIR" "$BUILD_DIR"
 
-swiftc -O -o "$MACOS_DIR/$APP_NAME" Sources/LiveWallpaper.swift
+APP_SOURCES="Sources/main.swift Sources/WallpaperModel.swift Sources/WallpaperHost.swift Sources/UI.swift"
+swiftc -O -o "$MACOS_DIR/$APP_NAME" $APP_SOURCES
 echo "    app binary: $(ls -l "$MACOS_DIR/$APP_NAME" | awk '{print $5}') bytes"
 
 # helper: image -> looping MP4 (used by the video route)

@@ -42,16 +42,40 @@ cd live-wallpaper
 ./build.sh --install          # -> ~/Applications/LiveWallpaper.app, then launches it
 ```
 
-A sparkles icon appears in the menu bar: wallpaper list, Pause / Resume, Reload (⌘R),
-Open Wallpapers Folder, Start at Login, Quit.
+A sparkles icon appears in the menu bar: **LiveWallpaper Settings…** (⌘O), the wallpaper list,
+Pause / Resume, Reload (⌘R), Open Wallpapers Folder, Start at Login, Quit.
+
+## The window
+
+The menu-bar item → **LiveWallpaper Settings…**, double-clicking the app, or ⌘O opens the GUI. A
+re-launch of a running copy just brings this window forward (no second instance).
+
+```
+┌─ Wallpapers ─────────┬─ live preview of the selected wallpaper ────────┐
+│ starbound-loading  ✓ │  (HTML renders in WebKit, video loops in AV)    │
+│   HTML / animation   │                                                 │
+│                      │  starbound-loading        [Use this wallpaper]  │
+│  [Add…] [Reveal] [🗑] ├─────────────────────────────────────────────────┤
+│                      │ Settings                                        │
+│                      │  [ ] Pause wallpaper     [ ] Start at login     │
+│                      │  3 displays — same wallpaper on all  [Reload]   │
+│                      │  ~/…/LiveWallpaper/wallpapers    [Open folder]   │
+└──────────────────────┴─────────────────────────────────────────────────┘
+```
+
+- **Add…** — copies any HTML file, video, image or folder into the wallpapers folder.
+- **Use this wallpaper** — applies it to every display immediately, no restart.
+- **Trash** — deletes the selected wallpaper from the wallpapers folder.
+- **Pause wallpaper** — hides it without quitting. **Start at login** — via `SMAppService`.
+- The preview is the real thing: the same WebKit/video content, rendered live in the window.
 
 ### Opening it, and the `-10825` gotcha
 
 A Dock-less (accessory) app has to implement `applicationShouldHandleReopen`. Without it, LaunchServices
 cannot hand a re-launch to the running instance and `open LiveWallpaper.app` fails with
 `_LSOpenURLsWithCompletionHandler() failed with error -10825` **whenever the app is already running** —
-which looks exactly like "the app won't open". This app implements it, so double-clicking while it runs
-just shows a note telling you where the menu-bar icon is (one instance, no stacking).
+which looks exactly like "the app won't open". This app implements it: a re-launch brings the settings
+window to the front (one instance, no stacking).
 
 A bundle LaunchServices has never seen can fail the same way once, which is why `./build.sh --install`
 registers the fresh bundle with `lsregister` before launching it.
@@ -139,12 +163,19 @@ python3 tools/starbound_unpack.py --extract '^/interface/title/.*\.png$' --out .
 `Sources/wphost-cli.swift` builds to `build/wphost` — the same engine without a menu bar, handy for
 scripting and tests: `./build/wphost --web page.html --seconds 5`.
 
-The app has two hidden flags used to verify it really is on screen:
+The app has hidden flags used to verify it is really on screen:
 
 ```bash
-./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --status     # window levels + what each page rendered, then quits
-./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --seconds 5  # run for 5 s and exit
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --status          # levels, status item, what each page rendered
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --seconds 5       # run for 5 s and exit
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --dump-a11y       # the window's accessibility tree
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --dump-ui out.png # render the window to a PNG
 ```
+
+`--dump-a11y` is the trustworthy way to check the GUI: it prints every control with its role, label and
+frame, via the same accessibility API VoiceOver uses. Rendering a SwiftUI window with `cacheDisplay`
+(`--dump-ui`) is unreliable — SwiftUI draws into layers it does not hand to that path, so the PNG comes
+back missing most of the controls.
 
 Real `--status` output from the machine this was developed on:
 
