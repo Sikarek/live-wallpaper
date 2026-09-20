@@ -663,19 +663,39 @@ def main():
     print(f"# extracted {len(wanted)} assets ({len(STAR_SHEETS)} star sheets, {len(CLOUD_SHEETS)} clouds, "
           f"{len(orbiters)} disc stack(s))")
 
-    # Composite the celestial stack the way the engine does: base halves, masks CLIPPED to the planet
-    # (sourceAtop), shadow pass, then the atmosphere.
+    # Composite the celestial stack the way the engine does. Two shapes, from worldHorizonImages():
+    #   dry world   : base = <biome>_l|r  (+ the surface masks, this build's own tuning)
+    #   liquid world: base = the LIQUID, and the biome rides ON TOP of it clipped to the masks
+    #                 (celestial.config: "liquidTextures" then baseImages with "?addmask=<masks>"),
+    #                 which is what puts landmasses in the sea instead of a flat ocean.
+    # Then the shadow pass, then the atmosphere.
     compositor = ensure_compositor()
     horizon = os.path.join(assets, "horizon.png")
-    base_pair = ("liquid_l.png", "liquid_r.png") if liquid else (f"{args.planet}_l.png", f"{args.planet}_r.png")
-    cmd = [compositor, horizon, "1764", "202", "--planet", base_pair[0], base_pair[1]]
-    if args.shade:
-        cmd += ["--multiply", "0.45", "shadow_l.png", "shadow_r.png"]
     mask_files = []
     for m in masks:
         mask_files += [f"mask{m}_l.png", f"mask{m}_r.png"]
-    if mask_files:
-        cmd += ["--atop", str(args.mask_alpha)] + mask_files
+    if liquid:
+        landmass = os.path.join(assets, "landmass.png")
+        plate = [compositor, landmass, "1764", "202"]
+        if mask_files:
+            plate += ["--over"] + mask_files                                  # the landmass shapes
+            plate += ["--atop", "1.0", f"{args.planet}_l.png", f"{args.planet}_r.png"]   # biome only there
+        else:
+            plate += ["--over", f"{args.planet}_l.png", f"{args.planet}_r.png"]          # all land, no sea
+        print("  " + subprocess.run(plate, capture_output=True, text=True, cwd=assets).stdout.strip())
+        cmd = [compositor, horizon, "1764", "202", "--planet", "liquid_l.png", "liquid_r.png",
+               "--over", str(args.mask_alpha), "landmass.png"]
+        if args.shade:
+            cmd += ["--multiply", "0.45", "shadow_l.png", "shadow_r.png"]
+    else:
+        # the dry-world pass order is unchanged from the build that produced the shipped wallpaper
+        # (base -> shadow -> masks): keep it byte-for-byte instead of "tidying" the look.
+        cmd = [compositor, horizon, "1764", "202", "--planet",
+               f"{args.planet}_l.png", f"{args.planet}_r.png"]
+        if args.shade:
+            cmd += ["--multiply", "0.45", "shadow_l.png", "shadow_r.png"]
+        if mask_files:
+            cmd += ["--atop", str(args.mask_alpha)] + mask_files
     cmd += ["--screen", "atmosphere_l.png", "atmosphere_r.png"]
     print("  " + subprocess.run(cmd, capture_output=True, text=True, cwd=assets).stdout.strip())
 

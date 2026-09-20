@@ -152,6 +152,42 @@ private func pixelHash(_ rep: NSBitmapImageRep?) -> Int {
     return data.hashValue
 }
 
+/// A liquid world is the liquid as its base **plus the biome image clipped to the surface masks**, so the
+/// masks must visibly change it (land in the sea). The bug this guards against: replacing the base with
+/// the liquid and never drawing the biome, which turns every planet into a flat ocean.
+func liquidChecks(then done: @escaping () -> Void) {
+    print("== 6. a surface liquid keeps its landmasses ==")
+    let work = FileManager.default.temporaryDirectory.appendingPathComponent("composer-liquid-\(getpid())")
+    try? FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+
+    func generate(_ name: String, extra: [String], then next: @escaping (URL) -> Void) {
+        let folder = work.appendingPathComponent(name)
+        try? FileManager.default.removeItem(at: folder)
+        let result = Tools.run(arguments: ["--planet", "garden", "--liquid", "water", "--masks", "6,11,17",
+                                          "--seed", "1234567", "--out", folder.path] + extra)
+        let ok = (result?.code ?? -1) == 0
+        check(ok, "[\(name)] liquid world generated")
+        if !ok { print("      " + (result?.out.suffix(200) ?? "")); done(); return }
+        next(folder)
+    }
+
+    func horizon(_ folder: URL) -> Data? {
+        try? Data(contentsOf: folder.appendingPathComponent("assets/horizon.png"))
+    }
+
+    generate("flat", extra: ["--mask-alpha", "0.0"]) { bare in
+        generate("landed", extra: ["--mask-alpha", "0.18"]) { landed in
+            let flat = horizon(bare), withLand = horizon(landed)
+            check(flat != nil && withLand != nil, "both liquid worlds produced a horizon image")
+            check(flat != withLand, "the surface masks change a liquid world — land in the sea, not a flat ocean")
+            check(FileManager.default.fileExists(atPath: landed.appendingPathComponent("assets/landmass.png").path),
+                  "the landmass plate was composited")
+            check(flat?.count != withLand?.count || flat != withLand, "the two seas differ in bytes, not just metadata")
+            done()
+        }
+    }
+}
+
 struct SelfTestCase {
     let name: String
     let arguments: [String]
@@ -359,7 +395,7 @@ func runComposerSelfTest() {
             check((result?.code ?? -1) == 0, "generated a hue-shifted variant")
             snapshot(hueFolder.appendingPathComponent("index.html"), query: "t=60") { b in
                 check(pixelHash(b) != h1, "a 150° hue shift produces different pixels")
-                previewUpdateChecks { finish() }
+                previewUpdateChecks { liquidChecks { finish() } }
             }
         }
     }

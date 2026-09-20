@@ -271,6 +271,8 @@ sources):
 
 ```
 19  planet art sets        horizon/textures/<biome>_l|r.png      (17 of them also have sky disc art)
+                               a surface liquid keeps the biome on TOP of it, clipped to the masks:
+                               sea + landmasses, exactly as worldHorizonImages() stacks it
 25  surface masks          maskRange [1,25]
 0-3 masks per planet       maskPerPlanetRange varies by biome (garden 3, scorchedcity 2-3, ocean 1-2)
  6  surface liquids        horizon/liquids/<liquid>_l|r.png
