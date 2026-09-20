@@ -107,11 +107,16 @@ HTML = """<!doctype html>
 <style>
   html, body { height: 100%; margin: 0; background: #04060d; overflow: hidden; }
   body { min-width: 640px; min-height: 420px; }
+  /* the two static layers the engine paints every frame now live in the compositor instead: a sky
+     gradient behind the canvas and the title-screen darkening in front of it */
+  body { background: linear-gradient(#06080f 0%, #04060d 55%, #0a1020 100%); }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #__lwDarken { position: fixed; inset: 0; background: #000; opacity: __DARKEN__; pointer-events: none; }
 </style>
 </head>
 <body>
 <canvas id="sky"></canvas>
+<div id="__lwDarken"></div>
 <div id="__lwDebug" style="position:fixed;left:-99999px;top:0;font-size:1px"></div>
 <script>
 // surface any runtime error where the tests can see it
@@ -167,8 +172,21 @@ var started = false, forcedValue = null, lastSeconds = 0;
 var targetFps = __TARGET_FPS__;
 var drawingOff = false;
 var lastDraw = 0;
+var sleeping = false, sleepStartedAt = null, loopTicks = 0;
 window.__lwSetFps = function (value) { targetFps = value || 0; };
-window.__lwSetPaused = function (value) { drawingOff = !!value; };
+// Pausing has to stop the requestAnimationFrame loop itself, not just skip the work inside it: a loop
+// still running at 100 Hz keeps the CPU and the compositor awake for nothing. The sky's clock is
+// corrected by the time spent asleep, so it resumes where it belongs rather than where it stopped.
+window.__lwSetPaused = function (value) {
+  var next = !!value;
+  if (next === sleeping) return;
+  if (next) { sleeping = true; sleepStartedAt = performance.now(); }
+  else {
+    if (sleepStartedAt !== null) { skyTime += (performance.now() - sleepStartedAt) / 1000; }
+    sleepStartedAt = null; sleeping = false; lastDraw = 0; accumulator = 0;
+    requestAnimationFrame(function (now) { lastNow = now; loop(now); });
+  }
+};
 window.__lwCost = function () { return { targetFps: targetFps, paused: drawingOff, drawn: frame.count || 0 }; };
 
 // The Lock Screen plays a LOOPING VIDEO, and the extension restarts it on every lock (the freeze
@@ -302,12 +320,8 @@ function dot(x, y, r, style) {
 }
 
 function drawSky() {
-  var g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0.0, '#06080f');
-  g.addColorStop(0.55, '#04060d');
-  g.addColorStop(1.0, '#0a1020');          // the engine lerps topRectColor -> bottomRectColor
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
+  // the gradient is a CSS layer behind the canvas now; a clear is far cheaper than a full-canvas fill
+  ctx.clearRect(0, 0, W, H);
 }
 
 // renderStars(): the field is queried over a view rect padded by screenBuffer and rotated by
@@ -417,8 +431,7 @@ function drawClouds(orbitAngle) {
 }
 
 function drawDarken() {
-  ctx.fillStyle = 'rgba(0,0,0,' + CFG.darken.toFixed(3) + ')';
-  ctx.fillRect(0, 0, W, H);
+  // darkening is a CSS overlay (see #__lwDarken) — nothing to paint per frame
 }
 
 function frame(seconds) {
@@ -480,6 +493,8 @@ function start() {
       setPhase: typeof window.__lwSetPhase === 'function',      // is this the current page or a cached one?
       targetFps: targetFps,
       drawingOff: drawingOff,
+      sleeping: sleeping,
+      ticks: loopTicks,
       pageSeconds: Math.round(seconds % CFG.dayLength),
       cloudState: cloudImages.map(function (i) { return (i.complete ? 'done' : 'loading') + ':' + i.naturalWidth; }).join(' '),
       horizonWidth: horizonImage.naturalWidth,
@@ -503,7 +518,7 @@ function start() {
     var stillTime = forcedValue !== null ? forcedValue : currentSeconds();
     frame(stillTime);
     setInterval(function () {
-      if (drawingOff) return;
+      if (sleeping) return;
       if (phaseTarget !== null) {
         var nowSeconds = currentSeconds();
         stillTime = nowSeconds - (nowSeconds % CFG.dayLength) + phaseTarget;
@@ -532,6 +547,8 @@ function start() {
   var drawnFrames = 0;
 
   (function loop(now) {
+    if (sleeping) return;
+    loopTicks++;                                // rAF callbacks, drawn or not                       // no callback, no wake-up, no energy
     var delta = (now - lastNow) / 1000;
     lastNow = now;
     if (delta > 0.25 || delta < 0) {           // after display sleep/suspend: resume, don't fast-forward

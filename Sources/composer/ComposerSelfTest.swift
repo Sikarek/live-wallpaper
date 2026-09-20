@@ -680,6 +680,7 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
         var folder: URL?
         var query: String?
         var evalScript: String?
+        var shotPath: String?
         var size = NSSize(width: 1280, height: 720)
         var index = 0
         while index < arguments.count {
@@ -687,6 +688,7 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
             case "--probe":  index += 1; if index < arguments.count { folder = URL(fileURLWithPath: arguments[index]) }
             case "--query":  index += 1; if index < arguments.count { query = arguments[index] }
             case "--eval":   index += 1; if index < arguments.count { evalScript = arguments[index] }
+            case "--shot":   index += 1; if index < arguments.count { shotPath = arguments[index] }
             case "--size":
                 index += 1
                 if index < arguments.count {
@@ -747,7 +749,21 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
             """
             view.evaluateJavaScript(script) { value, error in
                 print("  sprites: \(value as? String ?? "eval failed: \(error.map(String.init(describing:)) ?? "")")")
-                exit(0)
+                guard let shotPath else { exit(0) }
+                // write what the page actually renders, so it can be looked at instead of trusted
+                let config = WKSnapshotConfiguration()
+                config.rect = NSRect(origin: .zero, size: view.frame.size)
+                view.takeSnapshot(with: config) { image, snapshotError in
+                    if let image, let tiff = image.tiffRepresentation,
+                       let rep = NSBitmapImageRep(data: tiff),
+                       let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: shotPath))
+                        print("  snapshot: \(shotPath)")
+                    } else {
+                        print("  snapshot failed: \(snapshotError?.localizedDescription ?? "unknown")")
+                    }
+                    exit(0)
+                }
             }
         }
         view.load(page: page)
