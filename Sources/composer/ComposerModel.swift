@@ -162,25 +162,67 @@ final class Composer: ObservableObject {
         return args
     }
 
-    /// Regenerate the preview folder (async) and hand the new page to the web view.
+    /// A signature of every knob the generator takes. The UI watches this: any change to it means the
+    /// preview must be rebuilt. (Without this the window showed the first page forever — the controls
+    /// wrote to the model and nothing ever re-ran the generator.)
+    var signature: String {
+        [planet, liquid, masks.map(String.init).joined(separator: ","), String(format: "%.3f", maskAlpha),
+         String(format: "%.1f", hueShift), String(format: "%.2f", cloudAlpha), String(starsPerCell),
+         String(format: "%.1f", dayLength), String(moons), Array(moonTypes.prefix(moons)).joined(separator: ","),
+         parentPlanet, String(format: "%.2f", moonSize), String(format: "%.2f", planetSize),
+         String(discShadow), String(seed)].joined(separator: "|")
+    }
+
+    private var pendingPreview: DispatchWorkItem?
+    private var generation = 0
+
+    /// Called on every knob change: coalesce a burst (a slider drag fires dozens of times) into one build.
+    func schedulePreview(after delay: TimeInterval = 0.45) {
+        pendingPreview?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.refreshPreview() }
+        pendingPreview = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Writes the current combination into a FRESH folder and hands it to the preview. A new folder each
+    /// time is what makes WebKit actually re-read the page and its images: same-URL file:// content is
+    /// served from its cache, which is the other half of "the preview never changes".
     func refreshPreview() {
         guard toolsOK else { status = "tools not found — run build.sh to bundle them"; return }
+        pendingPreview?.cancel()
+        pendingPreview = nil
+        generation += 1
+        let token = generation
+        let dir = Self.previewDir.appendingPathComponent("g\(token)", isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
+        let args = generatorArguments + ["--out", dir.path]
         busy = true
         status = "building…"
-        let args = generatorArguments + ["--out", Self.previewDir.path]
-        let dir = Self.previewDir
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Tools.run(arguments: args)
             DispatchQueue.main.async {
+                guard self.generation == token else { return }        // a newer build already won
                 self.busy = false
                 guard let result, result.code == 0 else {
                     self.status = "generator failed: " + (result?.out.split(separator: "\n").last.map(String.init) ?? "unknown error")
                     return
                 }
+                URLCache.shared.removeAllCachedResponses()
                 self.previewURL = dir.appendingPathComponent("index.html")
-                self.previewToken += 1
+                self.previewToken = token
                 self.status = "preview updated"
+                self.pruneOldPreviews(keep: token)
             }
+        }
+    }
+
+    /// The old generations are dead weight (each carries its own copy of the art).
+    private func pruneOldPreviews(keep: Int) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: Self.previewDir, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix("g") {
+            guard let number = Int(entry.lastPathComponent.dropFirst()) else { continue }
+            if number < keep - 1 { try? fm.removeItem(at: entry) }
         }
     }
 

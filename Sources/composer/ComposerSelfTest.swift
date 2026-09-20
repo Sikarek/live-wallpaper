@@ -9,6 +9,79 @@
 import AppKit
 import WebKit
 
+/// Knob changes must rebuild the preview. This drives the same model API the window's `onChange` calls
+/// and requires the rendered page to differ — the bug it guards against is "the controls update the
+/// model and nothing re-renders", which looks exactly like controls that do nothing.
+func previewUpdateChecks(then done: @escaping () -> Void) {
+    print("== 5. changing a knob rebuilds the preview ==")
+    let composer = Composer()
+    check(composer.palette != nil, "the Composer read its palette from the tool")
+    composer.name = "selftest-preview"
+
+    func waitForPreview(from token: Int, attempts: Int = 0, then: @escaping () -> Void) {
+        if composer.previewToken != token {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { then() }
+            return
+        }
+        if attempts > 600 {
+            check(false, "the preview rebuild finished (token \(token), status \(composer.status))")
+            done()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            waitForPreview(from: token, attempts: attempts + 1, then: then)
+        }
+    }
+
+    func snapshotOfPreview(_ label: String, then: @escaping (Int, String?, URL?) -> Void) {
+        guard let page = composer.previewURL else {
+            check(false, "[\(label)] produced a page (\(composer.status))")
+            done()
+            return
+        }
+        snapshot(page, query: "t=0") { image in
+            then(luminanceSpread(image), pixelHash(image).description, page)
+        }
+    }
+
+    // combination A: garden, no moons
+    composer.planet = "garden"; composer.liquid = "none"; composer.moons = 0
+    composer.parentPlanet = "none"; composer.seed = 1
+    let tokenA = composer.previewToken
+    composer.refreshPreview()
+    waitForPreview(from: tokenA) {
+        snapshotOfPreview("garden") { spreadA, hashA, pageA in
+            // combination B: midnight + water + three moons + an ocean parent planet
+            composer.planet = "midnight"; composer.liquid = "water"; composer.moons = 3
+            composer.moonTypes = ["moon", "barren", "tundra"]; composer.parentPlanet = "ocean"; composer.seed = 42
+            let tokenB = composer.previewToken
+            composer.refreshPreview()
+            waitForPreview(from: tokenB) {
+                snapshotOfPreview("midnight") { spreadB, hashB, pageB in
+                    check(spreadA > 20 && spreadB > 20, "both previews rendered real pixels (\(spreadA) / \(spreadB))")
+                    check(pageB?.path != pageA?.path,
+                          "each build gets its own folder, so WebKit cannot serve a cached page or image")
+                    check(hashA != hashB, "the preview actually changed with the options")
+                    probePage(pageB ?? URL(fileURLWithPath: "/"), query: "t=0") { json, error in
+                        check(json != nil, "the second combination's page renders cleanly (\(error))")
+                        check((json?["orbitersDrawn"] as? Int) == 4,
+                              "it draws the three moons and the parent planet (got \(json?["orbitersDrawn"] ?? "?") )")
+                        check((json?["horizonWidth"] as? Int) == 1764, "the horizon band is there")
+                        // a burst of changes (a slider drag) must coalesce into ONE rebuild
+                        let before = composer.previewToken
+                        for _ in 0..<6 { composer.schedulePreview(after: 0.3) }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                            check(composer.previewToken == before + 1,
+                                  "six quick changes coalesced into one rebuild (\(before) -> \(composer.previewToken))")
+                            done()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 private var failures: [String] = []
 private var checks = 0
 
@@ -286,7 +359,7 @@ func runComposerSelfTest() {
             check((result?.code ?? -1) == 0, "generated a hue-shifted variant")
             snapshot(hueFolder.appendingPathComponent("index.html"), query: "t=60") { b in
                 check(pixelHash(b) != h1, "a 150° hue shift produces different pixels")
-                finish()
+                previewUpdateChecks { finish() }
             }
         }
     }
@@ -341,7 +414,35 @@ final class DumpA11yDelegate: NSObject, NSApplicationDelegate {
             let pickers = counts["AXPopUpButton"] ?? 0, fields = counts["AXTextField"] ?? 0
             let ok = buttons >= 4 && sliders >= 5 && pickers >= 6 && fields >= 2
             print(ok ? "DUMP OK — every control group is present" : "DUMP INCOMPLETE — some controls are missing")
-            exit(ok ? 0 : 1)
+
+            // And now the part the user actually cares about: does changing something in THIS window
+            // rebuild the preview? The knobs are set on the model (exactly what a click does), so the
+            // view's onChange has to fire for the page to change.
+            let composer = self.appDelegate.composer
+            print("  before: \(composer.status) — page \(composer.previewURL?.deletingLastPathComponent().lastPathComponent ?? "none")")
+            composer.planet = "midnight"
+            composer.liquid = "water"
+            composer.moons = 3
+            composer.moonTypes = ["moon", "barren", "tundra"]
+            composer.parentPlanet = "ocean"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 26) {
+                print("  after:  \(composer.status) — page \(composer.previewURL?.deletingLastPathComponent().lastPathComponent ?? "none")")
+                print("  probe:  \(composer.probe.isEmpty ? "<none>" : composer.probe)")
+                // Assert on the folder's own plan, not on how many bodies happen to be on screen at this
+                // instant: the sky keeps turning, so a live moment legitimately shows a subset.
+                let plan = composer.previewURL?.deletingLastPathComponent().appendingPathComponent("backdrop.json")
+                var bodies = -1, planet = "?"
+                if let plan, let data = try? Data(contentsOf: plan),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    bodies = (json["orbiters"] as? [[String: Any]])?.count ?? -1
+                    planet = json["planet"] as? String ?? "?"
+                }
+                let followed = bodies == 4 && planet == "midnight"
+                print("  plan:   planet=\(planet) bodies=\(bodies) (expected midnight / 4)")
+                print(followed && ok ? "INTERACTIVE OK — the window's preview followed the knob change"
+                                     : "INTERACTIVE FAILED — the preview did not follow the change")
+                exit(followed && ok ? 0 : 1)
+            }
         }
     }
 

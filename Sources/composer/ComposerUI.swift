@@ -16,6 +16,8 @@ struct ComposerUI: View {
         .padding(14)
         .frame(minWidth: 1080, minHeight: 680)
         .onAppear { if composer.previewURL == nil { composer.refreshPreview() } }
+        // Every knob change rebuilds the preview (coalesced, so dragging a slider costs one build).
+        .onChange(of: composer.signature) { _, _ in composer.schedulePreview() }
     }
 
     // MARK: - left column
