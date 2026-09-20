@@ -167,12 +167,37 @@ struct DisplayInfo: Identifiable, Hashable {
     }
 }
 
+// MARK: - where the wallpaper is shown
+
+/// The two surfaces are different mechanisms — the desktop is our own window, the Lock Screen is a video
+/// in Apple's aerial slot — so "where" is a real choice, not a detail.
+enum Target: String, CaseIterable {
+    case desktop
+    case lockscreen
+    case both
+
+    var label: String {
+        switch self {
+        case .desktop:    return "Desktop only"
+        case .lockscreen: return "Lock Screen only"
+        case .both:       return "Desktop and Lock Screen"
+        }
+    }
+
+    var showsDesktop: Bool { self != .lockscreen }
+    var showsLockScreen: Bool { self != .desktop }
+}
+
 // MARK: - preferences
 
 enum Prefs {
     static var selected: String? {
         get { UserDefaults.standard.string(forKey: "selected") }
         set { UserDefaults.standard.set(newValue, forKey: "selected") }
+    }
+    static var target: String {
+        get { UserDefaults.standard.string(forKey: "target") ?? Target.both.rawValue }
+        set { UserDefaults.standard.set(newValue, forKey: "target") }
     }
     static var syncDisplays: Bool {
         get { UserDefaults.standard.object(forKey: "syncDisplays") as? Bool ?? true }
@@ -194,6 +219,8 @@ final class AppModel: ObservableObject {
     @Published var displayedNames: [String: String] = [:]          // display id -> wallpaper on screen
     @Published var displays: [DisplayInfo] = []
     @Published var syncDisplays = true
+    @Published var target: Target = .both
+    @Published var lockScreenNote = ""
     @Published var assignments: [String: String] = [:]
     @Published var paused = false
     @Published var launchAtLogin = false
@@ -208,6 +235,7 @@ final class AppModel: ObservableObject {
     var onRemove: ((Wallpaper) -> Void)?
     var onAdd: ((URL) -> Void)?
     var onSyncDisplays: ((Bool) -> Void)?
+    var onTarget: ((Target) -> Void)?
     var onAssign: ((CGDirectDisplayID, String) -> Void)?
 
     var selected: Wallpaper? { wallpapers.first { $0.name == selectedName } }

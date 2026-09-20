@@ -137,6 +137,21 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Settings").font(.headline)
 
+            Picker("Show the wallpaper on", selection: Binding(
+                get: { model.target },
+                set: { model.onTarget?($0) }
+            )) {
+                ForEach(Target.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            Text(model.lockScreenNote.isEmpty
+                 ? "The Lock Screen needs a clip rendered for the current wallpaper — the Starbound "
+                   + "Composer's “Render & Install for the Lock Screen”. Quitting always hands the "
+                   + "system wallpaper back."
+                 : model.lockScreenNote)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             Toggle("Pause wallpaper (hide it without quitting)", isOn: Binding(
                 get: { model.paused },
                 set: { model.onPause?($0) }

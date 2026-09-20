@@ -105,6 +105,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# the Lock Screen tool travels with the app: quitting has to be able to hand the aerial slot back even
+# if the repository is not around any more
+mkdir -p "$APP/Contents/Resources/tools"
+cp -f tools/lockscreen.py "$BUILD_DIR/probe_video" "$APP/Contents/Resources/tools/"
+
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "==> signing"

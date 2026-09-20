@@ -22,6 +22,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// the display layout we last built windows for, to ignore spurious change notifications
     var lastLayoutSignature = ""
 
+/// `tools/lockscreen.py` — installs/restores the aerial slot. Bundled inside this app so quitting can
+/// hand the system wallpaper back even if the repository has moved.
+enum LockscreenTool {
+    static var path: String? {
+        let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent("tools/lockscreen.py").path,
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Projects/live-wallpaper/tools/lockscreen.py").path
+        ].compactMap { $0 }
+        return candidates.first { FileManager.default.fileExists(atPath: $0) }
+    }
+}
+
+    // MARK: the system wallpaper
+
+    private var lockscreenDir: URL { appSupport.appendingPathComponent("lockscreen", isDirectory: true) }
+    private var aerialMarker: URL { lockscreenDir.appendingPathComponent("aerial-slot.json") }
+
+    /// Hand the aerial slot back to Apple. Only when OUR clip is in it (the marker records that).
+    ///
+    /// This is what keeps quitting tidy: while the wallpaper windows are up they cover the system
+    /// wallpaper, but a *replaced* aerial (a non-Apple video) renders BLACK on the naked desktop, so
+    /// quitting without restoring leaves a black screen. `--restore` puts Apple's own video and still
+    /// back and clears the marker, so the desktop and the Lock Screen return to normal.
+    @discardableResult
+    private func handBackSystemWallpaper(reason: String) -> Bool {
+        guard FileManager.default.fileExists(atPath: aerialMarker.path) else { return false }
+        guard let tool = LockscreenTool.path else {
+            NSLog("LIVEWALLPAPER (\(reason)) lockscreen.py not found — the system wallpaper stays replaced")
+            return false
+        }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        task.arguments = [tool, "--restore"]
+        do { try task.run() } catch {
+            NSLog("LIVEWALLPAPER (\(reason)) could not run \(tool): \(error.localizedDescription)")
+            return false
+        }
+        task.waitUntilExit()
+        NSLog("LIVEWALLPAPER (\(reason)) restored Apple's aerial (exit \(task.terminationStatus)) — "
+              + "the desktop goes back to the normal wallpaper")
+        return task.terminationStatus == 0
+    }
+
+    private var syncLastNote = ""
+
+    /// Keep the Lock Screen in step with the desktop: if a clip has been rendered for this wallpaper
+    /// (the Composer writes <name>.mov), install it into the slot when it is not already the one there.
+    private func syncLockScreenClip(for name: String?) {
+        guard let name, !name.isEmpty else { syncLastNote = ""; return }
+        let clip = lockscreenDir.appendingPathComponent("\(name).mov")
+        guard FileManager.default.fileExists(atPath: clip.path) else {
+            syncLastNote = "Lock Screen: no clip rendered for “\(name)” yet — use Render & Install in "
+                + "the Starbound Composer (Apple's wallpaper stays until then)"
+            return
+        }
+        if let data = try? Data(contentsOf: aerialMarker),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           (json["video"] as? String) == clip.path {
+            syncLastNote = "Lock Screen: showing \(name).mov (already installed)"
+            return                                   // already the clip in the slot
+        }
+        guard let tool = LockscreenTool.path else {
+            syncLastNote = "Lock Screen: lockscreen.py not found"
+            return
+        }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        task.arguments = [tool, "--install", clip.path]
+        do { try task.run() } catch { return }
+        task.waitUntilExit()
+        let ok = task.terminationStatus == 0
+        syncLastNote = ok ? "Lock Screen: showing \(name).mov (just installed)"
+                          : "Lock Screen: could not install \(name).mov (is the clip still rendering?)"
+        NSLog("LIVEWALLPAPER lock screen: installed \(name).mov (exit \(task.terminationStatus))")
+    }
+
     // MARK: lifecycle
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -36,8 +113,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             reason: "Live wallpaper is on screen")
 
         let argv = CommandLine.arguments
-        let debugRun = argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
-            || argv.contains("--dump-a11y") || argv.contains("--self-test") || argv.contains("--watch") || argv.contains("--simulate-lock")
+        let debugRun = argv.contains("--set-target") || argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
+            || argv.contains("--dump-a11y") || argv.contains("--restore-wallpaper") || argv.contains("--self-test") || argv.contains("--watch") || argv.contains("--simulate-lock")
 
         // One instance only: two of these would stack two sets of wallpaper windows.
         if !debugRun, let id = Bundle.main.bundleIdentifier,
@@ -71,6 +148,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             forName: Notification.Name("com.sikarek.livewallpaper.apply"), object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            // re-read the shared preferences: the Composer and the menu both write them, and a change
+            // made while we were running has to be picked up here or "apply" quietly keeps the old mode
+            self.model.target = Target(rawValue: Prefs.target) ?? .both
+            self.model.syncDisplays = Prefs.syncDisplays
             self.model.refresh(keepSelection: true)
             if let selected = Prefs.selected, self.model.wallpapers.contains(where: { $0.name == selected }) {
                 self.model.selectedName = selected
@@ -87,6 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.refresh(keepSelection: false)
         model.refreshDisplays()
         model.launchAtLogin = LoginItem.isEnabled
+        model.target = Target(rawValue: Prefs.target) ?? .both
         // --wallpaper <name> overrides the saved choice (handy for tests and scripting)
         if let i = argv.firstIndex(of: "--wallpaper"), i + 1 < argv.count {
             Prefs.selected = argv[i + 1]
@@ -98,6 +180,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else {
             applyPlan()
         }
+
+        applicationTerminationHook()
 
         host.onChange = { [weak self] in self?.syncModel() }
         host.onGeometryMismatch = { [weak self] in
@@ -136,6 +220,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if argv.contains("--status") { reportStatus() }
         if argv.contains("--self-test") { runSelfTest() }
+        if argv.contains("--restore-wallpaper") { restoreAndExit() }
+        if let i = argv.firstIndex(of: "--set-target"), i + 1 < argv.count,
+           let option = Target(rawValue: argv[i + 1]) {
+            Prefs.target = option.rawValue
+            model.target = option
+            applyPlan()
+            NSLog("LIVEWALLPAPER set-target \(option.rawValue): windows=\(host.slots.count) "
+                  + "note=\(model.lockScreenNote)")
+            print("target=\(option.rawValue) windows=\(host.slots.count) \(model.lockScreenNote)")
+            exit(0)
+        }
 
         if let i = argv.firstIndex(of: "--dump-ui"), i + 1 < argv.count {
             showWindow(nil)
@@ -253,6 +348,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.onPause = { [weak self] paused in self?.host.setPaused(paused) }
         model.onReload = { [weak self] in self?.applyPlan() }
         model.onReveal = { NSWorkspace.shared.activateFileViewerSelecting([wallpapersDir]) }
+        model.onTarget = { [weak self] target in
+            Prefs.target = target.rawValue
+            self?.applyPlan()
+        }
         model.onSyncDisplays = { [weak self] sync in
             Prefs.syncDisplays = sync
             self?.model.syncDisplays = sync
@@ -318,10 +417,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let plan = resolvePlan()
         guard !plan.isEmpty else { return }
         lastLayoutSignature = screenSignature()     // remember what we laid out for
-        host.show(plan)
+        if model.target.showsDesktop {
+            host.show(plan)                         // our own windows on the desktop
+        } else {
+            host.teardown()                         // desktop untouched: the system wallpaper shows
+        }
         syncModel()
         rebuildMenu()
+        applyLockScreenSide(name: plan.first?.wallpaper.name)
     }
+
+    /// The Lock Screen half of the target: put the clip rendered for this wallpaper into the aerial
+    /// slot, or hand the slot back to Apple when the Lock Screen is not part of the target.
+    private func applyLockScreenSide(name: String?) {
+        if model.target.showsLockScreen {
+            syncLockScreenClip(for: name)
+            model.lockScreenNote = syncLastNote
+        } else {
+            handBackSystemWallpaper(reason: "target=\(model.target.rawValue)")
+            model.lockScreenNote = "Lock Screen: Apple's own wallpaper (not part of the target)"
+        }
+    }
+
+    /// Any quit — the menu, ⌘Q, a logout — has to hand the aerial slot back, or the desktop is left
+    /// showing a replaced (and therefore black) system wallpaper. SIGTERM is covered separately because
+    /// a signal does not run AppKit's termination path (launchctl bootout and `pkill` use it).
+    private func applicationTerminationHook() {
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                              object: nil, queue: .main) { [weak self] _ in
+            self?.handBackSystemWallpaper(reason: "quit")
+        }
+        let signalSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        signalSource.setEventHandler { [weak self] in
+            self?.handBackSystemWallpaper(reason: "SIGTERM")
+            exit(0)
+        }
+        signalSource.resume()
+        Self.signalSource = signalSource            // must stay alive for the handler to fire
+        signal(SIGTERM, SIG_IGN)                    // …and the default action must be off
+    }
+
+    private static var signalSource: DispatchSourceSignal?
 
     /// Mirror what the engine currently has on screen into the UI model.
     func syncModel() {
@@ -398,6 +534,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         menu.addItem(.separator())
 
+        let targetItem = NSMenuItem(title: "Show the wallpaper on", action: nil, keyEquivalent: "")
+        let targetMenu = NSMenu()
+        for option in Target.allCases {
+            let item = NSMenuItem(title: option.label, action: #selector(setTarget(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = option.rawValue
+            item.state = (Prefs.target == option.rawValue) ? .on : .off
+            targetMenu.addItem(item)
+        }
+        targetItem.submenu = targetMenu
+        menu.addItem(targetItem)
+        menu.addItem(.separator())
+
         let pause = NSMenuItem(title: host.paused ? "Resume" : "Pause", action: #selector(togglePause), keyEquivalent: "")
         pause.target = self
         menu.addItem(pause)
@@ -445,6 +594,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([wallpapersDir])
     }
 
+    @objc private func setTarget(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let option = Target(rawValue: raw) else { return }
+        Prefs.target = raw
+        model.target = option
+        applyPlan()
+        NSLog("LIVEWALLPAPER target = \(raw) — desktop \(option.showsDesktop ? "on" : "off"), "
+              + "lock screen \(option.showsLockScreen ? "on" : "off")")
+    }
+
     @objc private func toggleLogin() {
         _ = LoginItem.set(!LoginItem.isEnabled)
         model.launchAtLogin = LoginItem.isEnabled
@@ -465,6 +623,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     // MARK: debug / verification
+
+    /// `--restore-wallpaper`: hand the slot back and exit (what quitting does; scriptable).
+    func restoreAndExit() {
+        let restored = handBackSystemWallpaper(reason: "--restore-wallpaper")
+        print(restored ? "restored Apple's aerial" : "nothing of ours was in the slot")
+        exit(restored ? 0 : 2)
+    }
 
     func reportStatus() {
         NSLog("LIVEWALLPAPER level=\(WallpaperHost.level) desktopIcon=\(Int(CGWindowLevelForKey(.desktopIconWindow))) screens=\(NSScreen.screens.count) windows=\(host.slots.count) sync=\(Prefs.syncDisplays) library=\(model.wallpapers.count)")

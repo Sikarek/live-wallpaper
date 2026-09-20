@@ -36,19 +36,29 @@ extension Composer {
             completion?(); return
         }
         try? FileManager.default.createDirectory(at: Self.lockScreenDir, withIntermediateDirectories: true)
+        // render to a temporary name and only publish "<name>.mov" when it is complete: the wallpaper
+        // app watches for "<name>.mov" and would otherwise try to install a half-written file
         let movie = Self.lockScreenDir.appendingPathComponent("\(safeName).mov")
+        let partial = Self.lockScreenDir.appendingPathComponent("\(safeName).rendering.mov")
+        try? FileManager.default.removeItem(at: partial)
 
         busy = true
         status = "rendering the Lock Screen clip at \(Int(dayLength))s (4K, this takes a while)…"
         let dayLength = Int(dayLength)
         DispatchQueue.global(qos: .userInitiated).async {
             Tools.runStreaming(executable: renderer,
-                               arguments: [movie.path, folder.path, "--width", "3840", "--height", "2160",
+                               arguments: [partial.path, folder.path, "--width", "3840", "--height", "2160",
                                            "--fps", "15", "--encode-fps", "240"]) { line in
                 if let percent = Self.percent(from: line) { self.report("rendering… \(percent)", busy: true) }
             }
-            guard FileManager.default.fileExists(atPath: movie.path) else {
+            let manager = FileManager.default
+            guard manager.fileExists(atPath: partial.path) else {
                 self.report("render failed — see ~/Library/Logs or run rendertitle by hand", busy: false)
+                completion?(); return
+            }
+            try? manager.removeItem(at: movie)
+            do { try manager.moveItem(at: partial, to: movie) } catch {
+                self.report("could not publish the clip: \(error.localizedDescription)", busy: false)
                 completion?(); return
             }
             self.report("installing into the Lock Screen slot…", busy: true)
