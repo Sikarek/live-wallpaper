@@ -16,12 +16,15 @@ import AppKit
 import CoreGraphics
 
 let argv = CommandLine.arguments
-guard argv.count >= 5 else {
-    FileHandle.standardError.write("usage: composite_pngs out.png W H [--planet l r] [--atop l r ...] [--over l r]\n".data(using: .utf8)!)
+var printStats = false
+var arguments = Array(argv)
+if let index = arguments.firstIndex(of: "--stats") { printStats = true; arguments.remove(at: index) }
+guard arguments.count >= 5 else {
+    FileHandle.standardError.write("usage: composite_pngs out.png W H [--planet l r] [--atop l r ...] [--over l r] [--stack f ...] [--stats]\n".data(using: .utf8)!)
     exit(2)
 }
-let outPath = argv[1]
-guard let canvasW = Int(argv[2]), let canvasH = Int(argv[3]), canvasW > 0, canvasH > 0 else { exit(2) }
+let outPath = arguments[1]
+guard let canvasW = Int(arguments[2]), let canvasH = Int(arguments[3]), canvasW > 0, canvasH > 0 else { exit(2) }
 
 struct Group {
     var mode: CGBlendMode
@@ -33,18 +36,18 @@ struct Group {
 }
 var groups: [Group] = []
 var index = 4
-while index < argv.count {
-    let flag = argv[index]
+while index < arguments.count {
+    let flag = arguments[index]
     index += 1
     // an optional alpha may follow the flag: --atop 0.18 mask1.png mask2.png
     var alpha: CGFloat = 1
-    if index < argv.count, let value = Double(argv[index]), !argv[index].hasPrefix("--") {
+    if index < arguments.count, let value = Double(arguments[index]), !arguments[index].hasPrefix("--") {
         alpha = CGFloat(value)
         index += 1
     }
     var files: [String] = []
-    while index < argv.count, !argv[index].hasPrefix("--") {
-        files.append(argv[index])
+    while index < arguments.count, !arguments[index].hasPrefix("--") {
+        files.append(arguments[index])
         index += 1
     }
     let mode: CGBlendMode
@@ -98,6 +101,25 @@ for group in groups {
     }
 }
 ctx.setAlpha(1)
+
+if printStats, let buffer = ctx.data {
+    // "how much of this layer is actually opaque" is the question behind every layer-order decision in
+    // the horizon stack, so measure it instead of guessing from a rendered frame.
+    let bytesPerRow = ctx.bytesPerRow
+    let pixels = buffer.bindMemory(to: UInt8.self, capacity: bytesPerRow * canvasH)
+    var opaque = 0, partial = 0, total = 0
+    for y in 0..<canvasH {
+        for x in 0..<canvasW {
+            let alpha = pixels[y * bytesPerRow + x * 4 + 3]      // premultipliedLast = RGBA
+            total += 1
+            if alpha > 127 { opaque += 1 } else if alpha > 12 { partial += 1 }
+        }
+    }
+    let opaquePercent = 100.0 * Double(opaque) / Double(total)
+    let partialPercent = 100.0 * Double(partial) / Double(total)
+    print(String(format: "  stats: %.1f%% opaque, %.1f%% partial, %.1f%% empty",
+                 opaquePercent, partialPercent, 100.0 - opaquePercent - partialPercent))
+}
 
 guard let result = ctx.makeImage() else { exit(1) }
 let rep = NSBitmapImageRep(cgImage: result)

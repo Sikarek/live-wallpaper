@@ -175,14 +175,53 @@ func liquidChecks(then done: @escaping () -> Void) {
         try? Data(contentsOf: folder.appendingPathComponent("assets/horizon.png"))
     }
 
-    generate("flat", extra: ["--mask-alpha", "0.0"]) { bare in
-        generate("landed", extra: ["--mask-alpha", "0.18"]) { landed in
-            let flat = horizon(bare), withLand = horizon(landed)
-            check(flat != nil && withLand != nil, "both liquid worlds produced a horizon image")
-            check(flat != withLand, "the surface masks change a liquid world — land in the sea, not a flat ocean")
-            check(FileManager.default.fileExists(atPath: landed.appendingPathComponent("assets/landmass.png").path),
+    /// Ask the compositor itself how much of a plate is opaque — the coverage number is what makes the
+    /// "do the masks stack?" question answerable instead of guessable.
+    func coverage(_ image: URL) -> Double? {
+        guard let compositor = Tools.compositor else { return nil }
+        let process = Process()
+        process.executableURL = compositor
+        process.arguments = [work.appendingPathComponent("probe.png").path, "1764", "202",
+                             "--over", image.path, "--stats"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do { try process.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        guard let range = text.range(of: "stats: ") else { return nil }
+        let number = text[range.upperBound...].prefix(6)
+            .replacingOccurrences(of: "%", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return Double(number)
+    }
+
+    // one mask vs three: the masks STACK, so a wider mask set must cover more land. Before the fix the
+    // files were passed to a single pass and butted side by side, so only the middle pair reached the
+    // canvas and every "3 masks" wallpaper was really a 1-mask wallpaper.
+    generate("one-mask", extra: ["--masks", "6"]) { one in
+        generate("three-masks", extra: ["--masks", "6,11,17"]) { three in
+            let single = horizon(one), stacked = horizon(three)
+            check(single != nil && stacked != nil, "both liquid worlds produced a horizon image")
+            check(single != stacked, "a different mask set changes the land in the sea")
+            check(FileManager.default.fileExists(atPath: three.appendingPathComponent("assets/landmass.png").path),
                   "the landmass plate was composited")
-            check(flat?.count != withLand?.count || flat != withLand, "the two seas differ in bytes, not just metadata")
+
+            let oneCoverage = coverage(one.appendingPathComponent("assets/landmass.png"))
+            let threeCoverage = coverage(three.appendingPathComponent("assets/landmass.png"))
+            check(oneCoverage != nil && threeCoverage != nil, "the compositor reports coverage")
+            if let oneCoverage, let threeCoverage {
+                print(String(format: "      landmass coverage: 1 mask %.1f%%, 3 masks %.1f%%", oneCoverage, threeCoverage))
+                check(threeCoverage > oneCoverage + 5,
+                      "three masks cover more land than one — the masks stack instead of sitting side by side")
+            }
+            // and a dry world must still render (the dry path uses the same stacking now)
+            let dry = work.appendingPathComponent("dry")
+            let result = Tools.run(arguments: ["--planet", "garden", "--masks", "6,11,17", "--seed", "1234567",
+                                               "--out", dry.path])
+            check((result?.code ?? -1) == 0, "a dry world still generates")
+            check(coverage(dry.appendingPathComponent("assets/horizon.png")) ?? 0 > 20, "the dry horizon has content")
             done()
         }
     }

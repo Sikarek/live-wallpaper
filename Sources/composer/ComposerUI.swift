@@ -78,9 +78,16 @@ struct ComposerUI: View {
                         }.labelsHidden().frame(width: 66)
                     }
                 }
-                row("mask strength") {
-                    Slider(value: $composer.maskAlpha, in: 0...0.6)
-                    Text(String(format: "%.2f", composer.maskAlpha)).monospacedDigit().frame(width: 40)
+                if composer.liquid == "none" {
+                    row("mask strength") {
+                        Slider(value: $composer.maskAlpha, in: 0...0.6)
+                        Text(String(format: "%.2f", composer.maskAlpha)).monospacedDigit().frame(width: 40)
+                    }
+                } else {
+                    Text("With a surface liquid the mask numbers ARE the landmasses: land where they cover, "
+                         + "liquid in the gaps. Pick different (or fewer) masks to change how much sea the "
+                         + "world has — “mask strength” only applies to dry worlds.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 row("hue shift") {
                     Slider(value: $composer.hueShift, in: -180...180)

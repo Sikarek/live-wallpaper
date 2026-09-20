@@ -671,20 +671,32 @@ def main():
     # Then the shadow pass, then the atmosphere.
     compositor = ensure_compositor()
     horizon = os.path.join(assets, "horizon.png")
-    mask_files = []
-    for m in masks:
-        mask_files += [f"mask{m}_l.png", f"mask{m}_r.png"]
+    def mask_passes(flag, alpha=None):
+        """One pass PER mask pair, all at the same rect.
+
+        The engine adds the whole mask list at offset {0,0} (AlphaMaskImageOperation{Additive, masks,
+        {0,0}}), i.e. the masks STACK. Passing all six files to a single pass butts them side by side
+        instead, and with a 1764-wide canvas only the middle pair survives — which silently turned
+        "3 masks" into "1 mask" in every wallpaper built before this."""
+        passes = []
+        for m in masks:
+            passes += [flag] + ([str(alpha)] if alpha is not None else []) + [f"mask{m}_l.png", f"mask{m}_r.png"]
+        return passes
+
     if liquid:
         landmass = os.path.join(assets, "landmass.png")
         plate = [compositor, landmass, "1764", "202"]
-        if mask_files:
-            plate += ["--over"] + mask_files                                  # the landmass shapes
+        if masks:
+            plate += mask_passes("--over")                                     # the landmass shapes
             plate += ["--atop", "1.0", f"{args.planet}_l.png", f"{args.planet}_r.png"]   # biome only there
         else:
             plate += ["--over", f"{args.planet}_l.png", f"{args.planet}_r.png"]          # all land, no sea
         print("  " + subprocess.run(plate, capture_output=True, text=True, cwd=assets).stdout.strip())
+        # The engine draws the biome layer over the liquid at FULL strength: the mask is only the alpha
+        # channel of that layer, never a transparency knob. Damping it is what made every ocean world
+        # read as water with a hint of land.
         cmd = [compositor, horizon, "1764", "202", "--planet", "liquid_l.png", "liquid_r.png",
-               "--over", str(args.mask_alpha), "landmass.png"]
+               "--over", "landmass.png"]
         if args.shade:
             cmd += ["--multiply", "0.45", "shadow_l.png", "shadow_r.png"]
     else:
@@ -694,8 +706,8 @@ def main():
                f"{args.planet}_l.png", f"{args.planet}_r.png"]
         if args.shade:
             cmd += ["--multiply", "0.45", "shadow_l.png", "shadow_r.png"]
-        if mask_files:
-            cmd += ["--atop", str(args.mask_alpha)] + mask_files
+        if masks:
+            cmd += mask_passes("--atop", args.mask_alpha)
     cmd += ["--screen", "atmosphere_l.png", "atmosphere_r.png"]
     print("  " + subprocess.run(cmd, capture_output=True, text=True, cwd=assets).stdout.strip())
 
