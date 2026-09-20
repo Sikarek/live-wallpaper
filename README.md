@@ -243,6 +243,39 @@ python3 tools/starbound_mainmenu.py --cloud-alpha 1.0     # literal engine alpha
 
 Measured: 82,989 px (5.6% of the frame) change across 36 degrees of star rotation.
 
+## Lock Screen, and coming back after a restart
+
+macOS gives no API for custom live lock-screen content: the lock screen and the login window are drawn
+by the system before your session exists, and the only animated thing it will show is one of Apple's
+own aerial videos. So the same scene is baked into a video loop and takes over the *selected aerial's*
+slot — which is what every lock-screen-video app does.
+
+```bash
+build/rendertitle ~/Library/Application\ Support/LiveWallpaper/lockscreen/starbound.mov \
+    "$HOME/Library/Application Support/LiveWallpaper/wallpapers/starbound-mainmenu/assets" \
+    --width 3840 --height 2160 --fps 30 --seconds 300    # one full star revolution = seamless loop
+python3 tools/lockscreen.py --status                     # selected aerial + is the slot ours?
+python3 tools/lockscreen.py --install .../starbound.mov  # back up Apple's file, take the slot
+python3 tools/lockscreen.py --restore                    # put Apple's original back
+```
+
+Verified here: Apple's original backed up (105 MB), our 4K HEVC loop installed (74.8 MB, 300 s,
+hvc1, no audio), the wallpaper agent reloaded and the file was not reverted. The one thing only you
+can confirm is the lock screen itself — it cannot be captured programmatically. Press Control-Command-Q.
+
+Order of events after a restart:
+
+```
+1  login window at boot      draws the same aerial slot -> your scene, before you even log in
+2  after login               login LaunchAgent (RunAtLoad) starts the live desktop wallpaper
+3  if the app is ever killed  KeepAlive brings it straight back (tested with kill -9)
+4  Quit from the menu         deregisters the agent first, so quitting sticks
+```
+
+Caveats: re-picking a wallpaper in System Settings, or a macOS update, can re-download Apple's video
+and undo the lock screen — re-run `--install`. And the lock screen shows the *video*, not the live
+canvas: same scene, but it cannot react or change.
+
 ## Performance (measured, M2 Max, 3 displays incl. a 1512x982 Retina built-in)
 
 | content | CPU (whole process tree) |

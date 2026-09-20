@@ -344,6 +344,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func quit() {
+        // If this instance is owned by the login LaunchAgent, deregister it first — otherwise
+        // KeepAlive would immediately start the wallpaper again.
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        task.arguments = ["bootout", "gui/\(getuid())/com.sikarek.livewallpaper"]
+        try? task.run()
+        task.waitUntilExit()
+
         host.teardown()
         NSApp.terminate(nil)
     }

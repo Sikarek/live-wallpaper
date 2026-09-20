@@ -12,9 +12,13 @@
   <key>ProgramArguments</key>
   <array><string>__APP__/Contents/MacOS/LiveWallpaper</string></array>
   <key>RunAtLoad</key><true/>
+  <!-- always keep it running: if it is ever killed (crash, `kill -9`, a WebKit hiccup), launchd
+       brings the wallpaper straight back. Quit from the app's menu deregisters this job first, so
+       quitting still sticks. -->
+  <key>KeepAlive</key>
+  <true/>
   <key>StandardOutPath</key><string>__LOG__</string>
   <key>StandardErrorPath</key><string>__LOG__</string>
-  <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Interactive</string>
 </dict>
 </plist>

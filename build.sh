@@ -31,6 +31,11 @@ echo "    app binary: $(ls -l "$MACOS_DIR/$APP_NAME" | awk '{print $5}') bytes"
 swiftc -O -o "$BUILD_DIR/mkloop" tools/mkloop.swift
 echo "    helper: build/mkloop"
 
+# Lock Screen tooling: render the scene to a looping video, inspect video files
+swiftc -O -o "$BUILD_DIR/rendertitle" tools/rendertitle.swift
+swiftc -O -o "$BUILD_DIR/probe_video" tools/probe_video.swift
+echo "    tools: build/rendertitle, build/probe_video"
+
 # the CLI variant: same engine, no menu bar — handy for scripting and for testing
 swiftc -O -o "$BUILD_DIR/wphost" Sources/wphost-cli.swift
 echo "    cli: build/wphost"
