@@ -233,8 +233,12 @@ function drawStars(t, starRotation) {
     var size = starFrameSize[s.type];
     var px = sx * pixelRatio, py = sy * pixelRatio;  // screen px, still fractional
     if (size) {
+      // the engine draws its star sprites 1:1 in DEVICE pixels, so on a Retina panel they must not
+      // be 1:1 in CSS pixels or they come out ~2x too big next to the Lock Screen video
+      var deviceScale = 1 / DPR;
+      var sw = size[0] * deviceScale, sh = size[1] * deviceScale;
       ctx.drawImage(starSheets[s.type], frame * size[0], 0, size[0], size[1],
-                    px - size[0] / 2, H - py - size[1] / 2, size[0], size[1]);
+                    px - sw / 2, H - py - sh / 2, sw, sh);
     } else {
       dot(px, py, 1, 'rgba(255,255,255,0.9)');
     }

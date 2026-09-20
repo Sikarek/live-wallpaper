@@ -56,6 +56,7 @@ var seconds = 180.0
 var seed: Int32 = 1234567
 var starsPerCell = 80
 var codec = "hevc"
+var cloudAlpha = 3.0        // matches the HTML wallpaper's --cloud-alpha default
 
 let argv = CommandLine.arguments
 var i = 1
@@ -69,6 +70,7 @@ while i < argv.count {
     case "--seed" where i + 1 < argv.count: seed = Int32(argv[i + 1]) ?? seed; i += 2
     case "--stars-per-cell" where i + 1 < argv.count: starsPerCell = Int(argv[i + 1]) ?? starsPerCell; i += 2
     case "--codec" where i + 1 < argv.count: codec = argv[i + 1]; i += 2
+    case "--cloud-alpha" where i + 1 < argv.count: cloudAlpha = Double(argv[i + 1]) ?? cloudAlpha; i += 2
     default:
         if outPath.isEmpty { outPath = argv[i] } else if assetsDir.isEmpty { assetsDir = argv[i] }
         i += 1
@@ -237,14 +239,39 @@ func drawFrame(context ctx: CGContext, time t: Double) {
     let starRotation = 2 * Double.pi * day / dayLength
     let orbitAngle = 2 * Double.pi * t / dayLength
 
-    // sky
-    ctx.setFillColor(CGColor(red: 0.024, green: 0.031, blue: 0.059, alpha: 1))
-    ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    // sky: exactly what the canvas wallpaper paints in #space — two radial tints over a vertical
+    // gradient (#070b16 -> #04060d -> #02030a), so the two renderers agree on colour as well
+    let sky = CGGradient(colorsSpace: colorSpace, colors: [
+        CGColor(red: 0.027, green: 0.043, blue: 0.086, alpha: 1),
+        CGColor(red: 0.016, green: 0.024, blue: 0.051, alpha: 1),
+        CGColor(red: 0.008, green: 0.012, blue: 0.039, alpha: 1)
+    ] as CFArray, locations: [0.0, 0.55, 1.0])!
+    ctx.drawLinearGradient(sky, start: CGPoint(x: 0, y: Double(height)),
+                           end: CGPoint(x: 0, y: 0), options: [])
+
+    func tint(_ cx: Double, _ cy: Double, _ rx: Double, _ ry: Double,
+              _ r: Double, _ g: Double, _ b: Double, _ alpha: Double) {
+        let tintGradient = CGGradient(colorsSpace: colorSpace, colors: [
+            CGColor(red: r, green: g, blue: b, alpha: alpha),
+            CGColor(red: r, green: g, blue: b, alpha: 0)
+        ] as CFArray, locations: [0.0, 1.0])!
+        ctx.saveGState()
+        ctx.translateBy(x: cx, y: cy)
+        ctx.scaleBy(x: 1, y: ry / rx)
+        ctx.drawRadialGradient(tintGradient, startCenter: .zero, startRadius: 0,
+                               endCenter: .zero, endRadius: rx, options: [])
+        ctx.restoreGState()
+    }
+    tint(Double(width) * 0.5, Double(height) * 0.92, Double(width) * 0.4, Double(height) * 0.3,
+         0.157, 0.227, 0.431, 0.55)                                              // blue, top centre
+    tint(Double(width) * 0.2, Double(height) * 0.7, Double(width) * 0.3, Double(height) * 0.2,
+         0.235, 0.157, 0.353, 0.35)                                              // purple, left
 
     // stars: rotate the field about the view centre, draw at fractional positions
     let cosR = cos(starRotation), sinR = sin(starRotation)
     let cx = viewW / 2, cy = viewH / 2
     ctx.setShouldAntialias(false)
+    ctx.interpolationQuality = .high          // canvas uses imageSmoothingEnabled = true
     for star in field {
         let sx = cx + star.x * cosR - star.y * sinR
         let sy = cy + star.x * sinR + star.y * cosR
@@ -261,12 +288,26 @@ func drawFrame(context ctx: CGContext, time t: Double) {
     }
     ctx.setShouldAntialias(true)
 
+    // the limb glow the canvas version paints with #glow (radial, screen blend)
+    let glowCenter = CGPoint(x: Double(width) / 2, y: 0)
+    let glowRadius = Double(width) * 0.65
+    let glow = CGGradient(colorsSpace: colorSpace, colors: [
+        CGColor(red: 0.47, green: 0.75, blue: 1.0, alpha: 0.16),
+        CGColor(red: 0.47, green: 0.75, blue: 1.0, alpha: 0.0)
+    ] as CFArray, locations: [0.0, 1.0])!
+    ctx.setBlendMode(.screen)
+    ctx.drawRadialGradient(glow, startCenter: glowCenter, startRadius: 0,
+                           endCenter: glowCenter, endRadius: glowRadius, options: [])
+    ctx.setBlendMode(.normal)
+    ctx.interpolationQuality = .none
+
     // planet (nearest-neighbour like the engine: crisp pixel-art limb)
     let pw = Double(planet.width) * planetRatio, ph = Double(planet.height) * planetRatio
-    ctx.interpolationQuality = .none
     ctx.draw(planet, in: CGRect(x: (Double(width) - pw) / 2, y: 0, width: pw, height: ph))
 
-    // horizon clouds
+    // horizon clouds (screen blend + the same alpha boost the canvas wallpaper uses)
+    ctx.setBlendMode(.screen)
+    ctx.setAlpha(cloudAlpha)
     for cloud in cloudList {
         let a = cloud.startAngle + orbitAngle * cloud.speed
         let x = cos(a) * cloud.radius + cx
@@ -274,12 +315,12 @@ func drawFrame(context ctx: CGContext, time t: Double) {
         if y < -80 { continue }
         let image = clouds[cloud.image]
         let cw = Double(image.width) * planetRatio, ch = Double(image.height) * planetRatio
-        ctx.setBlendMode(.screen)
         ctx.draw(image, in: CGRect(x: x * pixelRatio - cw / 2,
                                    y: y * pixelRatio - ch / 2,           // y-up: bottom at y, not H-y
                                    width: cw, height: ch))
-        ctx.setBlendMode(.normal)
     }
+    ctx.setAlpha(1)
+    ctx.setBlendMode(.normal)
 
     // title.config skyBackdropDarken
     ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: DARKEN))

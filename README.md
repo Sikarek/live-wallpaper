@@ -302,6 +302,23 @@ Caveats: re-picking a wallpaper in System Settings, or a macOS update, can re-do
 and undo the lock screen — re-run `--install`. And the lock screen shows the *video*, not the live
 canvas: same scene, but it cannot react or change.
 
+### Keeping the Lock Screen and the desktop visually identical
+
+They are two different renderers (a WebKit canvas and a CoreGraphics video), so their parameters have
+to be kept in step by hand. These four are what made the Lock Screen look and move differently:
+
+```
+star rotation + clouds   the video was rendered at --seconds 180 while the desktop runs the game's
+                         600 s day, so the lock screen wheeled 3.33x faster (2.00 vs 0.60 deg/s).
+                         Render the video with --seconds equal to the wallpaper's --day-length.
+cloud brightness         the canvas multiplies the faint wisps by --cloud-alpha 3.0; the video
+                         renderer ignored that, so its clouds were ~3x fainter. Now a flag there too.
+sky + limb glow          the canvas paints a vertical gradient plus a screen-blended #glow at the
+                         limb; the video renderer used a flat colour. Now both do the same.
+star sprite size         the engine draws stars 1:1 in DEVICE pixels; the canvas was drawing them 1:1
+                         in CSS pixels, i.e. ~2x too big on a Retina panel compared with the video.
+```
+
 ### The macOS 26 freeze bug (and the workaround this repo applies)
 
 A **custom** aerial video plays once and then goes static on every later lock. It is not your file: it
