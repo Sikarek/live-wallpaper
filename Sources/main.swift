@@ -325,13 +325,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSLog("LIVEWALLPAPER statusItem MISSING")
         }
         guard CommandLine.arguments.contains("--status") else { return }
-        host.probe { entries in
-            for entry in entries { NSLog("LIVEWALLPAPER page \(entry.label) \(entry.info)") }
-            if let w = self.window {
-                NSLog("LIVEWALLPAPER gui window frame=\(NSStringFromRect(w.frame)) visible=\(w.isVisible)")
+        // pages need a moment to load before they can report anything
+        func probeStatus(_ tries: Int) {
+            host.probe { entries in
+                let usable = entries.contains { !$0.info.contains("no-info") && !$0.info.contains("empty") }
+                if !usable, tries > 1 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { probeStatus(tries - 1) }
+                    return
+                }
+                for entry in entries { NSLog("LIVEWALLPAPER page \(entry.label) \(entry.info)") }
+                if let w = self.window {
+                    NSLog("LIVEWALLPAPER gui window frame=\(NSStringFromRect(w.frame)) visible=\(w.isVisible)")
+                }
+                NSApp.terminate(nil)
             }
-            NSApp.terminate(nil)
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { probeStatus(5) }
     }
 
     /// Render our own window straight to a PNG so the GUI can be inspected without screen recording.

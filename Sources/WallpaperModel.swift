@@ -9,8 +9,6 @@ import ServiceManagement
 let appSupport = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/LiveWallpaper", isDirectory: true)
 let wallpapersDir = appSupport.appendingPathComponent("wallpapers", isDirectory: true)
-let wrapperCache = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("Library/Caches/LiveWallpaper", isDirectory: true)
 
 let videoExtensions: Set<String> = ["mp4", "mov", "m4v"]
 let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "heic", "gif", "tiff", "webp"]
@@ -96,10 +94,12 @@ enum Library {
     }
 
     /// Wrap a still image in a generated page so it gets the same slow Ken-Burns drift.
+    /// The wrapper must live in the SAME directory as the image: WKWebView's file access is a
+    /// sandbox around one directory, so a wrapper in the caches folder cannot read the image.
     private static func wrap(image: URL) -> URL {
-        try? FileManager.default.createDirectory(at: wrapperCache, withIntermediateDirectories: true)
+        let directory = image.deletingLastPathComponent()
         let digest = String(image.path.hashValue.magnitude, radix: 16)
-        let out = wrapperCache.appendingPathComponent("img-\(digest).html")
+        let out = directory.appendingPathComponent(".lw-img-\(digest).html")   // dot-file: hidden from scan()
         if FileManager.default.fileExists(atPath: out.path) { return out }
         let html = """
         <!doctype html><html><head><meta charset="utf-8"><style>
@@ -110,7 +110,10 @@ enum Library {
           @keyframes kb{from{transform:scale(1.0) translate3d(0,0,0)}
                         to{transform:scale(1.09) translate3d(-1.2%,-0.9%,0)}}
           @media (prefers-reduced-motion:reduce){img{animation:none}}
-        </style></head><body><img src="\(image.absoluteString)"></body></html>
+        </style></head><body>
+        <img src="\(image.absoluteString)" onload="document.title='img ' + this.naturalWidth + 'x' + this.naturalHeight"
+             onerror="document.title='img FAILED'">
+        </body></html>
         """
         try? html.write(to: out, atomically: true, encoding: .utf8)
         return out
