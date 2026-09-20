@@ -25,7 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         let argv = CommandLine.arguments
-        let debugRun = argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui") || argv.contains("--dump-a11y")
+        let debugRun = argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
+            || argv.contains("--dump-a11y") || argv.contains("--self-test")
 
         // One instance only: two of these would stack two sets of wallpaper windows.
         if !debugRun, let id = Bundle.main.bundleIdentifier,
@@ -48,22 +49,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         buildStatusItem()
 
         model.refresh(keepSelection: false)
+        model.refreshDisplays()
         model.launchAtLogin = LoginItem.isEnabled
-        if let saved = UserDefaults.standard.string(forKey: "selected"),
-           let match = model.wallpapers.first(where: { $0.name == saved }) {
-            apply(match)
-        } else if let first = model.wallpapers.first {
-            apply(first)
-        } else {
-            writeStarterNote()
+        // --wallpaper <name> overrides the saved choice (handy for tests and scripting)
+        if let i = argv.firstIndex(of: "--wallpaper"), i + 1 < argv.count {
+            Prefs.selected = argv[i + 1]
         }
-        model.engineChanged(to: host.current?.name, paused: host.paused)
+        model.syncDisplays = Prefs.syncDisplays
+        model.assignments = Prefs.assignments
+        if model.wallpapers.isEmpty {
+            writeStarterNote()
+        } else {
+            applyPlan()
+        }
 
-        host.onChange = { [weak self] wallpaper, paused in
-            self?.model.engineChanged(to: wallpaper?.name, paused: paused)
+        host.onChange = { [weak self] in self?.syncModel() }
+        host.onGeometryMismatch = { [weak self] in
+            // last resort: rebuild every window from the fresh display list
+            self?.applyPlan()
         }
 
         if argv.contains("--status") { reportStatus() }
+        if argv.contains("--self-test") { runSelfTest() }
 
         if let i = argv.firstIndex(of: "--dump-ui"), i + 1 < argv.count {
             showWindow(nil)
@@ -84,18 +91,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 
+    /// Any change to the display layout — count, resolution, arrangement — rebuilds every window from
+    /// the current screen list, so each display keeps its own wallpaper at its own new geometry.
     @objc func screensChanged() {
-        host.rebuild()
-        model.displayCount = NSScreen.screens.count
+        NSLog("LIVEWALLPAPER displays changed: " + NSScreen.screens.map { WallpaperHost.describe($0) }.joined(separator: " | "))
+        model.refreshDisplays()
+        applyPlan()
     }
 
     // MARK: model wiring
 
     private func wireModel() {
-        model.onApply = { [weak self] wallpaper in self?.apply(wallpaper) }
+        model.onApply = { [weak self] wallpaper in
+            Prefs.selected = wallpaper.name
+            Prefs.syncDisplays = true
+            self?.model.syncDisplays = true
+            self?.applyPlan()
+        }
         model.onPause = { [weak self] paused in self?.host.setPaused(paused) }
-        model.onReload = { [weak self] in self?.host.rebuild() }
+        model.onReload = { [weak self] in self?.applyPlan() }
         model.onReveal = { NSWorkspace.shared.activateFileViewerSelecting([wallpapersDir]) }
+        model.onSyncDisplays = { [weak self] sync in
+            Prefs.syncDisplays = sync
+            self?.model.syncDisplays = sync
+            self?.applyPlan()
+        }
+        model.onAssign = { [weak self] display, name in
+            guard let self else { return }
+            var assignments = Prefs.assignments
+            assignments[String(display)] = name
+            Prefs.assignments = assignments
+            self.model.assignments = assignments
+            self.applyPlan()
+        }
         model.onLaunchAtLogin = { [weak self] want in
             let actual = LoginItem.set(want)
             self?.model.launchAtLogin = actual
@@ -115,22 +143,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.onRemove = { [weak self] wallpaper in
             guard let self else { return }
             Library.remove(wallpaper)
-            let wasCurrent = (wallpaper.name == self.host.current?.name)
+            var assignments = Prefs.assignments
+            for (key, value) in assignments where value == wallpaper.name { assignments[key] = nil }
+            Prefs.assignments = assignments
+            if Prefs.selected == wallpaper.name { Prefs.selected = nil }
+            self.model.assignments = assignments
             self.model.refresh(keepSelection: false)
-            if wasCurrent, let next = self.model.wallpapers.first {
-                self.apply(next)
-            } else {
-                self.model.engineChanged(to: self.host.current?.name, paused: self.host.paused)
-            }
+            self.applyPlan()
             self.model.status = "Removed \(wallpaper.name)"
         }
     }
 
-    private func apply(_ wallpaper: Wallpaper) {
-        UserDefaults.standard.set(wallpaper.name, forKey: "selected")
-        host.show(wallpaper)
-        model.refresh()
-        model.engineChanged(to: wallpaper.name, paused: host.paused)
+    /// The per-display plan: in sync mode every display gets the one chosen wallpaper; otherwise each
+    /// display falls back to its own assignment, then the sync choice, then the first in the library.
+    private func resolvePlan() -> [(screen: NSScreen, wallpaper: Wallpaper)] {
+        let syncWallpaper = model.wallpapers.first { $0.name == Prefs.selected } ?? model.wallpapers.first
+        var plan: [(screen: NSScreen, wallpaper: Wallpaper)] = []
+        for screen in NSScreen.screens {
+            var wallpaper = syncWallpaper
+            if !Prefs.syncDisplays,
+               let name = Prefs.assignments[String(WallpaperHost.displayID(of: screen))],
+               let match = model.wallpapers.first(where: { $0.name == name }) {
+                wallpaper = match
+            }
+            guard let chosen = wallpaper else { continue }
+            plan.append((screen, chosen))
+        }
+        return plan
+    }
+
+    func applyPlan() {
+        let plan = resolvePlan()
+        guard !plan.isEmpty else { return }
+        host.show(plan)
+        syncModel()
+        rebuildMenu()
+    }
+
+    /// Mirror what the engine currently has on screen into the UI model.
+    func syncModel() {
+        var current: [CGDirectDisplayID: String] = [:]
+        for slot in host.slots { current[slot.displayID] = slot.wallpaper.name }
+        model.engineChanged(current: current, paused: host.paused)
     }
 
     private func writeStarterNote() {
@@ -160,7 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             w.center()
             window = w
         }
-        model.displayCount = NSScreen.screens.count
+        model.refreshDisplays()
         model.refresh()
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
@@ -196,7 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let item = NSMenuItem(title: wallpaper.name, action: #selector(selectWallpaper(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = wallpaper.name
-            item.state = (wallpaper.name == host.current?.name) ? .on : .off
+            item.state = model.isOnScreen(wallpaper.name) ? .on : .off
             menu.addItem(item)
         }
         menu.addItem(.separator())
@@ -228,9 +282,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func selectWallpaper(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String,
-              let wallpaper = Library.scan().first(where: { $0.name == name }) else { return }
-        apply(wallpaper)
-        rebuildMenu()
+              Library.scan().contains(where: { $0.name == name }) else { return }
+        Prefs.selected = name
+        Prefs.syncDisplays = true
+        model.syncDisplays = true
+        applyPlan()
     }
 
     @objc private func togglePause() {
@@ -239,8 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func reload() {
-        host.rebuild()
-        rebuildMenu()
+        applyPlan()
     }
 
     @objc private func reveal() {
@@ -261,8 +316,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: debug / verification
 
     func reportStatus() {
-        NSLog("LIVEWALLPAPER level=\(WallpaperHost.level) desktopIcon=\(Int(CGWindowLevelForKey(.desktopIconWindow))) screens=\(NSScreen.screens.count) wallpaper=\(host.current?.name ?? "none") wallpapers=\(model.wallpapers.count)")
-        for line in host.statusLines() { NSLog("LIVEWALLPAPER window \(line)") }
+        NSLog("LIVEWALLPAPER level=\(WallpaperHost.level) desktopIcon=\(Int(CGWindowLevelForKey(.desktopIconWindow))) screens=\(NSScreen.screens.count) windows=\(host.slots.count) sync=\(Prefs.syncDisplays) library=\(model.wallpapers.count)")
+        for line in host.statusLines() { NSLog("LIVEWALLPAPER slot \(line)") }
         if let button = statusItem?.button {
             let win = button.window.map { NSStringFromRect($0.frame) } ?? "nil"
             NSLog("LIVEWALLPAPER statusItem button=\(NSStringFromRect(button.frame)) window=\(win) hidden=\(button.isHidden) menuItems=\(statusItem.menu?.items.count ?? -1)")
@@ -270,10 +325,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSLog("LIVEWALLPAPER statusItem MISSING")
         }
         guard CommandLine.arguments.contains("--status") else { return }
-        host.probeWeb { lines in
-            for line in lines { NSLog("LIVEWALLPAPER \(line)") }
+        host.probe { entries in
+            for entry in entries { NSLog("LIVEWALLPAPER page \(entry.label) \(entry.info)") }
             if let w = self.window {
-                NSLog("LIVEWALLPAPER gui window frame=\(NSStringFromRect(w.frame)) visible=\(w.isVisible) contentView=\(type(of: w.contentView!))")
+                NSLog("LIVEWALLPAPER gui window frame=\(NSStringFromRect(w.frame)) visible=\(w.isVisible)")
             }
             NSApp.terminate(nil)
         }

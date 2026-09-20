@@ -64,10 +64,38 @@ re-launch of a running copy just brings this window forward (no second instance)
 ```
 
 - **Add…** — copies any HTML file, video, image or folder into the wallpapers folder.
-- **Use this wallpaper** — applies it to every display immediately, no restart.
+- **Use on all displays** — applies the selected wallpaper to every display immediately, no restart.
+- **Sync all displays** — on: one wallpaper everywhere with the animation phase locked across screens.
+  Off: a picker per display, so each monitor can run a different wallpaper.
 - **Trash** — deletes the selected wallpaper from the wallpapers folder.
 - **Pause wallpaper** — hides it without quitting. **Start at login** — via `SMAppService`.
 - The preview is the real thing: the same WebKit/video content, rendered live in the window.
+
+## Displays: sync, per-display, any resolution
+
+Every display gets its own borderless window created **exactly** from `NSScreen.frame`, rebuilt the
+moment the display configuration changes (plug/unplug, resolution, arrangement, HDR/scaling change).
+
+| mode | behaviour |
+|---|---|
+| sync (default) | one wallpaper on every display, **phase-locked**: all pages are driven from one shared wall clock, so the Starfield/Nebula is at the same point on every screen. WebKit throttles individual views, which is why letting each page run its own timeline drifts (measured 579 ms apart) — with the shared clock it measured within **2–4 ms**. |
+| per-display | a popup per display, stored per display id, so a monitor keeps its wallpaper when unplugged and plugged back in |
+| video | one decoder shared by every screen (measured: **1 player for 3 screens**), so frames are identical by construction instead of merely similar |
+
+Resolution handling: the wallpaper is laid out at each display's own size (verified: 1920×1080 and
+1512×982 pages side by side, `devicePixelRatio` respected), video uses `resizeAspectFill`, and every
+page receives CSS variables it can adapt to — `--screen-width`, `--screen-height`, `--screen-scale`,
+`--screen-aspect` — plus `window.__lwEpoch` for JS/canvas wallpapers that want to phase-lock themselves.
+A geometry self-check a second after applying corrects a stale first-pass display arrangement, which
+the window server sometimes hands a freshly launched process.
+
+Run the whole thing as a test:
+
+```bash
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --self-test
+# 14 checks: geometry per display, resolution adaptation, phase sync, per-display assignment,
+# shared video player, dynamic resize, display-change rebuild. Exit code 0 = all passed.
+```
 
 ### Opening it, and the `-10825` gotcha
 
@@ -150,13 +178,14 @@ python3 tools/starbound_unpack.py --list 'nebula|starfield'
 python3 tools/starbound_unpack.py --extract '^/interface/title/.*\.png$' --out ./out
 ```
 
-## Performance (measured, M2 Max, 3 displays incl. a 1512x982 built-in)
+## Performance (measured, M2 Max, 3 displays incl. a 1512x982 Retina built-in)
 
 | content | CPU (whole process tree) |
 |---|---|
-| CoreAnimation layers | 0.0% |
-| video loop (1512x982) | 1.7% |
-| HTML canvas wallpaper | 2.7% |
+| HTML/CSS wallpaper (Starbound backdrop, all 3 screens) | 0.8% avg, 2.2% peak |
+| video loop, one shared player for 3 screens | 0.9% avg, 2.0% peak |
+
+Those figures include the animation-sync loop.
 
 ## Debug / CLI
 
@@ -166,10 +195,13 @@ scripting and tests: `./build/wphost --web page.html --seconds 5`.
 The app has hidden flags used to verify it is really on screen:
 
 ```bash
-./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --status          # levels, status item, what each page rendered
-./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --seconds 5       # run for 5 s and exit
-./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --dump-a11y       # the window's accessibility tree
-./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --dump-ui out.png # render the window to a PNG
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --status                 # levels, status item, what each page rendered
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --seconds 5              # run for 5 s and exit
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --self-test              # 14 end-to-end checks, exit 0 = all passed
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --self-test --wallpaper videoloop
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --wallpaper jades-drift  # override the saved choice
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --dump-a11y              # the window's accessibility tree
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --dump-ui out.png        # render the window to a PNG
 ```
 
 `--dump-a11y` is the trustworthy way to check the GUI: it prints every control with its role, label and

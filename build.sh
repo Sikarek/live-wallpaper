@@ -23,7 +23,7 @@ echo "==> building $APP_NAME $VERSION"
 rm -rf "$APP"
 mkdir -p "$MACOS_DIR" "$BUILD_DIR"
 
-APP_SOURCES="Sources/main.swift Sources/WallpaperModel.swift Sources/WallpaperHost.swift Sources/UI.swift"
+APP_SOURCES="Sources/main.swift Sources/WallpaperModel.swift Sources/WallpaperHost.swift Sources/UI.swift Sources/SelfTest.swift"
 swiftc -O -o "$MACOS_DIR/$APP_NAME" $APP_SOURCES
 echo "    app binary: $(ls -l "$MACOS_DIR/$APP_NAME" | awk '{print $5}') bytes"
 

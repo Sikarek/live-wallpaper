@@ -80,7 +80,7 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
-            if wallpaper.name == model.currentName {
+            if model.isOnScreen(wallpaper.name) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
                     .help("Currently on your desktop")
@@ -112,7 +112,7 @@ struct ContentView: View {
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-                if model.selected?.name == model.currentName {
+                if model.isOnScreen(model.selected?.name ?? "") {
                     Label(model.paused ? "Paused" : "On your desktop",
                           systemImage: model.paused ? "pause.circle" : "checkmark.circle.fill")
                         .font(.caption)
@@ -121,10 +121,10 @@ struct ContentView: View {
                 Button {
                     if let w = model.selected { model.onApply?(w) }
                 } label: {
-                    Text("Use this wallpaper")
+                    Text(model.syncDisplays ? "Use on all displays" : "Use on all displays (sync)")
                 }
                 .keyboardShortcut(.return, modifiers: [])
-                .disabled(model.selected == nil || model.selected?.name == model.currentName)
+                .disabled(model.selected == nil || (model.syncDisplays && model.selected?.name == model.currentName))
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 12)
@@ -149,14 +149,45 @@ struct ContentView: View {
             ))
             .toggleStyle(.switch)
 
-            HStack(spacing: 10) {
-                Label("\(model.displayCount) display\(model.displayCount == 1 ? "" : "s") — same wallpaper on all of them",
-                      systemImage: "display")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
-                Button("Reload") { model.onReload?() }
-            }
+                HStack {
+                    Toggle("Sync all displays", isOn: Binding(
+                        get: { model.syncDisplays },
+                        set: { model.onSyncDisplays?($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    Spacer()
+                    Button("Reload") { model.onReload?() }
+                }
+
+                if model.syncDisplays {
+                    Label("\(model.displayCount) display\(model.displayCount == 1 ? "" : "s") — same wallpaper, phase-locked",
+                          systemImage: "display")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    ForEach(model.displays) { display in
+                        HStack(spacing: 8) {
+                            Image(systemName: "display")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(display.label).font(.caption)
+                                Text(display.resolution).font(.caption2).foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Picker("", selection: Binding(
+                                get: { model.assignedName(for: display.id) ?? model.currentName ?? "" },
+                                set: { model.onAssign?(display.id, $0) }
+                            )) {
+                                ForEach(model.wallpapers) { wallpaper in
+                                    Text(wallpaper.name).tag(wallpaper.name)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 160)
+                        }
+                    }
+                }
 
             HStack(spacing: 6) {
                 Image(systemName: "folder")

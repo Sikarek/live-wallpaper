@@ -141,15 +141,59 @@ enum Library {
     }
 }
 
+// MARK: - displays
+
+struct DisplayInfo: Identifiable, Hashable {
+    let id: CGDirectDisplayID
+    let name: String
+    let width: Int
+    let height: Int
+    let scale: Int
+
+    var label: String { "\(name)" }
+    var resolution: String { "\(width)×\(height) @\(scale)x" }
+
+    static func current() -> [DisplayInfo] {
+        NSScreen.screens.map { screen in
+            DisplayInfo(id: WallpaperHost.displayID(of: screen),
+                        name: screen.localizedName,
+                        width: Int(screen.frame.width.rounded()),
+                        height: Int(screen.frame.height.rounded()),
+                        scale: Int(screen.backingScaleFactor.rounded()))
+        }
+    }
+}
+
+// MARK: - preferences
+
+enum Prefs {
+    static var selected: String? {
+        get { UserDefaults.standard.string(forKey: "selected") }
+        set { UserDefaults.standard.set(newValue, forKey: "selected") }
+    }
+    static var syncDisplays: Bool {
+        get { UserDefaults.standard.object(forKey: "syncDisplays") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "syncDisplays") }
+    }
+    /// display id (as string) -> wallpaper name
+    static var assignments: [String: String] {
+        get { UserDefaults.standard.dictionary(forKey: "assignments") as? [String: String] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "assignments") }
+    }
+}
+
 // MARK: - shared UI state
 
 final class AppModel: ObservableObject {
     @Published var wallpapers: [Wallpaper] = []
     @Published var selectedName: String?
-    @Published var currentName: String?
+    @Published var currentName: String?                            // sync-mode wallpaper
+    @Published var displayedNames: [String: String] = [:]          // display id -> wallpaper on screen
+    @Published var displays: [DisplayInfo] = []
+    @Published var syncDisplays = true
+    @Published var assignments: [String: String] = [:]
     @Published var paused = false
     @Published var launchAtLogin = false
-    @Published var displayCount = NSScreen.screens.count
     @Published var status = ""
 
     // actions wired up by the app delegate
@@ -160,8 +204,14 @@ final class AppModel: ObservableObject {
     var onReveal: (() -> Void)?
     var onRemove: ((Wallpaper) -> Void)?
     var onAdd: ((URL) -> Void)?
+    var onSyncDisplays: ((Bool) -> Void)?
+    var onAssign: ((CGDirectDisplayID, String) -> Void)?
 
     var selected: Wallpaper? { wallpapers.first { $0.name == selectedName } }
+    var displayCount: Int { displays.count }
+
+    func isOnScreen(_ name: String) -> Bool { displayedNames.values.contains(name) }
+    func assignedName(for display: CGDirectDisplayID) -> String? { assignments[String(display)] }
 
     func refresh(keepSelection: Bool = true) {
         let previous = selectedName
@@ -171,11 +221,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Called whenever the engine changes what is on screen.
-    func engineChanged(to name: String?, paused isPaused: Bool) {
-        currentName = name
+    func refreshDisplays() { displays = DisplayInfo.current() }
+
+    /// Called whenever the engine has (re)built what is on screen.
+    func engineChanged(current: [CGDirectDisplayID: String], paused isPaused: Bool) {
+        displayedNames = Dictionary(current.map { (String($0.key), $0.value) }, uniquingKeysWith: { a, _ in a })
         paused = isPaused
-        if selectedName == nil { selectedName = name }
+        currentName = current.values.first
+        if selectedName == nil { selectedName = currentName ?? wallpapers.first?.name }
     }
 }
 
