@@ -8,7 +8,16 @@
 //
 // build: swiftc -O -o rendertitle rendertitle.swift
 // run:   ./rendertitle out.mov <assets-dir> [--width 1920] [--height 1080] [--fps 30]
-//                          [--seconds 300] [--seed 1234567] [--stars-per-cell 80] [--codec hevc]
+//                          [--encode-fps 240] [--seconds 180] [--seed 1234567] [--codec hevc]
+//
+// The output deliberately matches Apple's own aerial encoding, because that is what the system's
+// wallpaper extension is built to play:
+//   * the manifest entry for an aerial is literally keyed "url-4K-SDR-240FPS"
+//   * Apple's files here are 3840x2160, hvc1, 10 bit, 239.76 fps, Rec.709 primaries with sRGB
+//     transfer, no audio
+// So: 10-bit HEVC, Rec.709/sRGB tags, and 240 fps. The 240 fps is produced by repeating each
+// rendered frame (--fps) 8 times, which costs almost nothing in file size (identical frames) but
+// gives the player the timebase it expects.
 //
 // Seamless loop: the star field completes exactly one revolution over --seconds, and a random field
 // rotated by 2*pi is identical, so the loop point is invisible. The faint horizon clouds keep the
@@ -19,6 +28,7 @@ import AVFoundation
 import AppKit
 import CoreGraphics
 import Foundation
+import VideoToolbox
 
 // MARK: - the game's numbers (/sky.config), matching the HTML wallpaper
 
@@ -41,7 +51,8 @@ var outPath = ""
 var assetsDir = ""
 var width = 1920, height = 1080
 var fps = 30
-var seconds = 300.0
+var encodeFps = 240
+var seconds = 180.0
 var seed: Int32 = 1234567
 var starsPerCell = 80
 var codec = "hevc"
@@ -53,6 +64,7 @@ while i < argv.count {
     case "--width" where i + 1 < argv.count: width = Int(argv[i + 1]) ?? width; i += 2
     case "--height" where i + 1 < argv.count: height = Int(argv[i + 1]) ?? height; i += 2
     case "--fps" where i + 1 < argv.count: fps = Int(argv[i + 1]) ?? fps; i += 2
+    case "--encode-fps" where i + 1 < argv.count: encodeFps = Int(argv[i + 1]) ?? encodeFps; i += 2
     case "--seconds" where i + 1 < argv.count: seconds = Double(argv[i + 1]) ?? seconds; i += 2
     case "--seed" where i + 1 < argv.count: seed = Int32(argv[i + 1]) ?? seed; i += 2
     case "--stars-per-cell" where i + 1 < argv.count: starsPerCell = Int(argv[i + 1]) ?? starsPerCell; i += 2
@@ -149,20 +161,63 @@ let EPOCH_BASE = Date(timeIntervalSince1970: 1_735_689_600)   // 2025-01-01T00:0
 let outURL = URL(fileURLWithPath: outPath)
 try? FileManager.default.removeItem(at: outURL)
 let writer = try AVAssetWriter(outputURL: outURL, fileType: .mov)
-let settings: [String: Any] = [
+var compression: [String: Any] = [
+    AVVideoAverageBitRateKey: codec == "h264" ? 12_000_000 : 9_000_000,
+    AVVideoMaxKeyFrameIntervalKey: encodeFps * 2
+]
+if codec != "h264" {
+    compression[AVVideoProfileLevelKey] = kVTProfileLevel_HEVC_Main10_AutoLevel   // 10-bit, like Apple's
+}
+var settings: [String: Any] = [
     AVVideoCodecKey: codec == "h264" ? AVVideoCodecType.h264 : AVVideoCodecType.hevc,
     AVVideoWidthKey: width,
     AVVideoHeightKey: height,
-    AVVideoCompressionPropertiesKey: [
-        AVVideoAverageBitRateKey: codec == "h264" ? 12_000_000 : 7_000_000,
-        AVVideoMaxKeyFrameIntervalKey: fps * 2
+    AVVideoCompressionPropertiesKey: compression,
+    // Apple's aerials are Rec.709 primaries with an sRGB transfer function (SDR)
+    AVVideoColorPropertiesKey: [
+        AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+        AVVideoTransferFunctionKey: AVVideoTransferFunction_IEC_sRGB,
+        AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
     ]
 ]
 let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
 input.expectsMediaDataInRealTime = false
+
+// Pick a pixel format that CoreGraphics can draw 10-bit into, so no conversion happens on the way to
+// the encoder. Falls back to 8-bit BGRA if none of them is available.
+struct PixelFormat { let type: OSType, bitmapInfo: UInt32, name: String }
+let candidates = [
+    PixelFormat(type: kCVPixelFormatType_64ARGB,
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder16Big.rawValue,
+                name: "64ARGB (16bpc)"),
+    PixelFormat(type: kCVPixelFormatType_32BGRA,
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue,
+                name: "32BGRA (8bpc)")
+]
+var chosen: PixelFormat?
+for candidate in candidates {
+    var probe: CVPixelBuffer?
+    let attrs: [CFString: Any] = [kCVPixelBufferWidthKey: 64, kCVPixelBufferHeightKey: 64,
+                                  kCVPixelBufferPixelFormatTypeKey: candidate.type]
+    guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, candidate.type, attrs as CFDictionary, &probe) == kCVReturnSuccess,
+          let buffer = probe else { continue }
+    CVPixelBufferLockBaseAddress(buffer, [])
+    let ok = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: 64, height: 64,
+                       bitsPerComponent: candidate.type == kCVPixelFormatType_64ARGB ? 16 : 8,
+                       bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                       space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: candidate.bitmapInfo) != nil
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    if ok { chosen = candidate; break }
+}
+guard let format = chosen else {
+    FileHandle.standardError.write("no usable pixel format\n".data(using: .utf8)!)
+    exit(1)
+}
+print("pixel format: \(format.name)")
+
 let adaptor = AVAssetWriterInputPixelBufferAdaptor(
     assetWriterInput: input,
-    sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+    sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: format.type,
                                   kCVPixelBufferWidthKey as String: width,
                                   kCVPixelBufferHeightKey as String: height])
 guard writer.canAdd(input) else { exit(1) }
@@ -171,9 +226,8 @@ writer.startWriting()
 writer.startSession(atSourceTime: .zero)
 
 let colorSpace = CGColorSpaceCreateDeviceRGB()
-let totalFrames = Int(seconds * Double(fps))
 let attributes: [CFString: Any] = [kCVPixelBufferWidthKey: width, kCVPixelBufferHeightKey: height,
-                                   kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA]
+                                   kCVPixelBufferPixelFormatTypeKey: format.type]
 
 // MARK: - draw one frame
 
@@ -236,29 +290,37 @@ func drawFrame(context ctx: CGContext, time t: Double) {
 
 let start = Date()
 let base = EPOCH_BASE.timeIntervalSinceNow * -1        // seconds since the fixed origin, now
-for frame in 0..<totalFrames {
+let duplicate = max(1, encodeFps / fps)                // 30 -> 240 fps = each frame appended 8x
+let uniqueFrames = Int(seconds * Double(fps))
+print("rendering \(uniqueFrames) frames, encoding \(uniqueFrames * duplicate) @\(encodeFps)fps")
+
+for frame in 0..<uniqueFrames {
     var buffer: CVPixelBuffer?
-    guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
+    guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, format.type,
                               attributes as CFDictionary, &buffer) == kCVReturnSuccess,
           let pixelBuffer = buffer else { exit(1) }
     CVPixelBufferLockBaseAddress(pixelBuffer, [])
     if let ctx = CGContext(data: CVPixelBufferGetBaseAddress(pixelBuffer), width: width, height: height,
-                           bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
-                           space: colorSpace,
-                           bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                                     | CGBitmapInfo.byteOrder32Little.rawValue) {
+                           bitsPerComponent: format.type == kCVPixelFormatType_64ARGB ? 16 : 8,
+                           bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
+                           space: colorSpace, bitmapInfo: format.bitmapInfo) {
         // the video's own phase must line up with the wallpaper's: same origin, one revolution per loop
         drawFrame(context: ctx, time: base + Double(frame) / Double(fps))
     }
     CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
-    while !input.isReadyForMoreMediaData { usleep(2000) }
-    if !adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: Int32(fps))) {
-        FileHandle.standardError.write("append failed at \(frame): \(String(describing: writer.error))\n".data(using: .utf8)!)
-        exit(1)
+
+    // repeat the frame to reach the player's expected 240 fps timebase
+    for copy in 0..<duplicate {
+        while !input.isReadyForMoreMediaData { usleep(2000) }
+        let pts = CMTime(value: Int64(frame * duplicate + copy), timescale: Int32(encodeFps))
+        if !adaptor.append(pixelBuffer, withPresentationTime: pts) {
+            FileHandle.standardError.write("append failed at \(frame)/\(copy): \(String(describing: writer.error))\n".data(using: .utf8)!)
+            exit(1)
+        }
     }
     if frame % (fps * 10) == 0 {
-        let done = Double(frame) / Double(totalFrames) * 100
-        print(String(format: "  %5.1f%%  frame %d/%d  (%.0fs elapsed)", done, frame, totalFrames,
+        let done = Double(frame) / Double(uniqueFrames) * 100
+        print(String(format: "  %5.1f%%  frame %d/%d  (%.0fs elapsed)", done, frame, uniqueFrames,
                      Date().timeIntervalSince(start)))
     }
 }
@@ -269,7 +331,7 @@ sem.wait()
 if writer.status == .completed {
     let size = ((try? FileManager.default.attributesOfItem(atPath: outPath))?[.size] as? Int) ?? 0
     print(String(format: "done: %@  %dx%d %d frames @%dfps  %.1f MB  in %.0fs",
-                 outPath, width, height, totalFrames, fps, Double(size) / 1_000_000,
+                 outPath, width, height, uniqueFrames * duplicate, encodeFps, Double(size) / 1_000_000,
                  Date().timeIntervalSince(start)))
 } else {
     FileHandle.standardError.write("writer failed: \(String(describing: writer.error))\n".data(using: .utf8)!)

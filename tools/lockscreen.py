@@ -25,10 +25,13 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 HOME = os.path.expanduser("~")
 STORE = f"{HOME}/Library/Application Support/com.apple.wallpaper/Store/Index.plist"
 VIDEOS = f"{HOME}/Library/Application Support/com.apple.wallpaper/aerials/videos"
+THUMBS = f"{HOME}/Library/Application Support/com.apple.wallpaper/aerials/thumbnails"
 BACKUP = f"{HOME}/Library/Application Support/LiveWallpaper/lockscreen-backup"
 _here = os.path.dirname(os.path.abspath(__file__))
 PROBE = next((c for c in (os.path.join(_here, "..", "build", "probe_video"),
@@ -93,6 +96,79 @@ def restart_wallpaper_agent():
     print("  asked the wallpaper agent to reload (it respawns automatically)")
 
 
+def decoder_running():
+    """Is the system actually decoding the selected aerial? A live coremedia.videodecoder means the
+    wallpaper extension accepted our file and is playing it; no decoder means it did not."""
+    out = subprocess.run(["pgrep", "-fl", "coremedia.videodecoder"], capture_output=True, text=True).stdout
+    return [l for l in out.splitlines() if "wallpaper" in l.lower() or "aerials" in l.lower()]
+
+
+def verify():
+    asset = selected_asset()
+    if not asset:
+        print("no aerial selected")
+        return False
+    slot, backup = slot_for(asset), backup_for(asset)
+    ok = True
+    print(f"selected aerial : {asset}")
+    if not os.path.exists(slot):
+        print("  slot file missing"); return False
+    ours = os.path.exists(backup) and os.path.getsize(slot) != os.path.getsize(backup)
+    print(f"  slot holds    : {'YOUR video' if ours else 'Apple original'}")
+    info = probe(slot)
+    for line in info.splitlines():
+        print(f"  {line}")
+    # the system's own encoding for this asset is branded url-4K-SDR-240FPS: 4K, SDR, 240 fps, 10 bit
+    import re
+    fps = re.search(r"([\d.]+) fps", info)
+    depth = re.search(r"bit depth=(\d+)", info)
+    size = re.search(r"(\d+)x(\d+)", info)
+    if fps and float(fps.group(1)) < 200:
+        print(f"  WARNING: {fps.group(1)} fps — the system expects ~240 fps for an aerial")
+        ok = False
+    if depth and depth.group(1) != "10":
+        print(f"  WARNING: {depth.group(1)}-bit — Apple's aerials are 10-bit")
+        ok = False
+    if size and (int(size.group(1)) < 3840):
+        print(f"  note: {size.group(0)} — Apple serves these at 4K (the system will scale yours)")
+    decoders = decoder_running()
+    print(f"  decoder process: {'yes' if decoders else 'not running'}"
+          f"{' — the extension is playing the slot' if decoders else ' — lock the screen to start it'}")
+    return ok
+
+
+def diagnose():
+    """Everything the system's aerial extension says about the slot, plus the format check."""
+    verify()
+    print("\n  --- what the wallpaper extension logged (last 5 min) ---")
+    out = subprocess.run(["log", "show", "--last", "5m",
+                          "--predicate", 'process CONTAINS "Wallpaper"',
+                          "--style", "compact"], capture_output=True, text=True).stdout
+    lines = [l for l in out.splitlines()
+             if any(k in l for k in ("enqueued", "error", "Error", "fail", "Fail", "asset", "Asset"))]
+    if not lines:
+        print("    nothing (the extension is silent — normal while your desktop window covers it)")
+    for line in lines[-12:]:
+        print("    " + line[:180])
+    print("\n  note: 'wallpaper video paused while the desktop is covered' is normal: macOS stops the")
+    print("        aerial's frames when nothing can see it. Frames should be enqueued on the lock screen.")
+
+
+def reapply():
+    """Nudge the system into rebuilding its cached view of the slot."""
+    asset = selected_asset()
+    if not asset:
+        sys.exit("no aerial selected")
+    slot = slot_for(asset)
+    if os.path.exists(slot):
+        os.utime(slot, None)                      # the extension keys its cache on the file's mtime
+        print(f"  touched {slot}")
+    restart_wallpaper_agent()
+    time.sleep(2)
+    decoders = decoder_running()
+    print(f"  decoder process after reload: {'yes' if decoders else 'not yet (appears when the lock screen or desktop draws)'}")
+
+
 def status():
     asset = selected_asset()
     print(f"selected aerial : {asset or 'none (System Settings has no aerial picked)'}")
@@ -107,6 +183,30 @@ def status():
         same = os.path.getsize(slot) == os.path.getsize(backup)
         state = "Apple's original" if same else "YOUR video"
         print(f"  slot holds    : {state}")
+
+
+def swap_thumbnail(asset, video):
+    """The asset's still (shown in Settings, and before motion starts) is a PNG next to the videos.
+    Replace it with a frame of our clip, keeping Apple's original in the backup folder."""
+    thumb = os.path.join(THUMBS, f"{asset}.png")
+    if not os.path.exists(thumb):
+        print("  no thumbnail for this asset — nothing to swap")
+        return
+    os.makedirs(BACKUP, exist_ok=True)
+    saved = os.path.join(BACKUP, f"{asset}.thumb.png")
+    if not os.path.exists(saved):
+        shutil.copy2(thumb, saved)
+        print(f"  backed up Apple's still -> {saved}")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["qlmanage", "-t", "-s", "214", "-o", tmp, video],
+                       capture_output=True)
+        produced = [os.path.join(tmp, f) for f in os.listdir(tmp)]
+        if not produced:
+            print("  could not render a still from the video; left Apple's")
+            return
+        shutil.copy2(produced[0], thumb)
+        os.chmod(thumb, 0o600)
+        print(f"  replaced the asset's still with a frame of your video ({os.path.getsize(thumb)} bytes)")
 
 
 def install(video):
@@ -136,6 +236,7 @@ def install(video):
     shutil.copy2(video, slot)
     os.chmod(slot, 0o600)                       # Apple's own files are 0600
     print(f"  installed {video} -> {slot} ({os.path.getsize(slot)/1_000_000:.1f} MB)")
+    swap_thumbnail(asset, slot)
     restart_wallpaper_agent()
     print("\n  Lock the screen (Control-Command-Q) to see it. The login window at boot uses the same slot.")
 
@@ -150,6 +251,12 @@ def restore():
     shutil.copy2(backup, slot)
     os.chmod(slot, 0o600)
     print(f"  restored Apple's original -> {slot}")
+    saved = os.path.join(BACKUP, f"{asset}.thumb.png")
+    thumb = os.path.join(THUMBS, f"{asset}.png")
+    if os.path.exists(saved):
+        shutil.copy2(saved, thumb)
+        os.chmod(thumb, 0o600)
+        print(f"  restored Apple's still -> {thumb}")
     restart_wallpaper_agent()
 
 
@@ -160,6 +267,12 @@ def main():
     group.add_argument("--status", action="store_true", help="show the selected aerial and slot contents")
     group.add_argument("--install", metavar="VIDEO", help="take the lock-screen slot with this video")
     group.add_argument("--restore", action="store_true", help="put Apple's original video back")
+    group.add_argument("--verify", action="store_true",
+                       help="check the slot: format vs Apple's, and whether the system is decoding it")
+    group.add_argument("--reapply", action="store_true",
+                       help="nudge the system to rebuild its cached view of the slot")
+    group.add_argument("--diagnose", action="store_true",
+                       help="verify + dump what the system's wallpaper extension logged")
     args = ap.parse_args()
 
     if args.status:
@@ -168,6 +281,12 @@ def main():
         install(os.path.expanduser(args.install))
     elif args.restore:
         restore()
+    elif args.verify:
+        sys.exit(0 if verify() else 1)
+    elif args.reapply:
+        reapply()
+    elif args.diagnose:
+        diagnose()
 
 
 if __name__ == "__main__":

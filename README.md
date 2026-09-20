@@ -259,9 +259,24 @@ python3 tools/lockscreen.py --install .../starbound.mov  # back up Apple's file,
 python3 tools/lockscreen.py --restore                    # put Apple's original back
 ```
 
-Verified here: Apple's original backed up (105 MB), our 4K HEVC loop installed (74.8 MB, 300 s,
-hvc1, no audio), the wallpaper agent reloaded and the file was not reverted. The one thing only you
-can confirm is the lock screen itself — it cannot be captured programmatically. Press Control-Command-Q.
+**The format matters, and it is specific.** The manifest entry for an aerial is keyed
+`url-4K-SDR-240FPS`, and Apple's own files here are 3840x2160, hvc1, **10-bit, 239.76 fps, Rec.709
+primaries with sRGB transfer, no audio**. A 30 fps / 8-bit file in that slot gets mishandled by the
+system's wallpaper extension (it would show wrong, or nothing at all); `rendertitle` therefore encodes
+to match, repeating each rendered frame so the 240 fps timebase costs almost nothing:
+
+```bash
+build/rendertitle .../starbound.mov <wallpaper-assets-dir> \
+    --width 3840 --height 2160 --fps 30 --encode-fps 240 --seconds 180
+python3 tools/lockscreen.py --install .../starbound.mov   # video + the asset's still image
+python3 tools/lockscreen.py --verify                      # format + is the system decoding it?
+python3 tools/lockscreen.py --reapply                     # nudge the extension's cache
+```
+
+`--verify` checks the two things that indicate health: the file matches Apple's encoding, and a
+`coremedia.videodecoder` process spawned by the *aerials* extension is running (that process is the
+system actually playing the slot; no decoder means it refused the file). The one thing only you can
+confirm is the lock screen itself — it cannot be captured programmatically. Press Control-Command-Q.
 
 Order of events after a restart:
 
