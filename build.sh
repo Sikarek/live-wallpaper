@@ -70,6 +70,14 @@ if [ "${1:-}" = "--install" ]; then
   echo "==> installed: $DEST/$APP_NAME.app"
   echo "    (keep it in a stable folder — 'Start at Login' registers this path)"
   pkill -x "$APP_NAME" 2>/dev/null || true
-  open "$DEST/$APP_NAME.app"
+  # `open` can fail in non-GUI shells; launchd is the reliable way to start a menu-bar app
+  if ! open "$DEST/$APP_NAME.app" 2>/dev/null; then
+    PLIST="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    sed "s|__APP__|$DEST/$APP_NAME.app|g; s|__BUNDLE_ID__|$BUNDLE_ID|g" \
+        support/launchagent.plist > "$PLIST"
+    launchctl bootout "gui/$(id -u)/$BUNDLE_ID" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" && echo "    started via launchd ($PLIST)"
+  fi
   echo "==> launched; look for the sparkles icon in the menu bar"
 fi

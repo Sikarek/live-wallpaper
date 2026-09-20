@@ -252,6 +252,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.accessory)
+
+        // Single instance: two of these would stack two sets of wallpaper windows.
+        // Skipped for the debug flags, which are meant to run alongside a live instance.
+        let debugRun = CommandLine.arguments.contains("--status") || CommandLine.arguments.contains("--seconds")
+        if !debugRun, let id = Bundle.main.bundleIdentifier,
+           NSRunningApplication.runningApplications(withBundleIdentifier: id).count > 1 {
+            NSLog("LIVEWALLPAPER another instance is already running — exiting")
+            exit(0)
+        }
+
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
                                               name: NSApplication.didChangeScreenParametersNotification,
                                               object: nil)

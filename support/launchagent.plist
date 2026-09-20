@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template used by build.sh --install when `open` is unavailable (headless/ssh shells).
+     __APP__ and __BUNDLE_ID__ are substituted by build.sh. Install it yourself with:
+       sed "s|__APP__|$HOME/Applications/LiveWallpaper.app|g; s|__BUNDLE_ID__|com.sikarek.livewallpaper|g" \
+         support/launchagent.plist > ~/Library/LaunchAgents/com.sikarek.livewallpaper.plist
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sikarek.livewallpaper.plist
+     `launchctl bootout gui/$(id -u)/com.sikarek.livewallpaper` removes it. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>__BUNDLE_ID__</string>
+  <key>ProgramArguments</key>
+  <array><string>__APP__/Contents/MacOS/LiveWallpaper</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__LOG__</string>
+  <key>StandardErrorPath</key><string>__LOG__</string>
+  <key>KeepAlive</key><false/>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

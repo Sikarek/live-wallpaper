@@ -45,6 +45,24 @@ cd live-wallpaper
 A sparkles icon appears in the menu bar: wallpaper list, Pause / Resume, Reload (⌘R),
 Open Wallpapers Folder, Start at Login, Quit.
 
+### Starting it from a shell that has no GUI session
+
+`open App.app` can fail (`LaunchServices error -10825`) in ssh/agent shells. The reliable route is a
+LaunchAgent, which also brings it back at login:
+
+```bash
+sed "s|__APP__|$HOME/Applications/LiveWallpaper.app|g; \
+     s|__BUNDLE_ID__|com.sikarek.livewallpaper|g; \
+     s|__LOG__|$HOME/Library/Logs/LiveWallpaper.log|g" \
+  support/launchagent.plist > ~/Library/LaunchAgents/com.sikarek.livewallpaper.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sikarek.livewallpaper.plist
+# remove it again:
+launchctl bootout gui/$(id -u)/com.sikarek.livewallpaper
+```
+
+The in-app **Start at Login** toggle (`SMAppService`) does the same thing from the GUI; a
+single-instance guard stops the two from stacking.
+
 ## Wallpapers
 
 The app scans `~/Library/Application Support/LiveWallpaper/wallpapers/`. A wallpaper is either
