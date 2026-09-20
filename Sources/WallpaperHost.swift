@@ -45,6 +45,28 @@ final class WallpaperHost {
 
     private(set) var slots: [ScreenSlot] = []
 
+    /// Stop or resume drawing on one display (per display: a window maximised on one monitor should not
+    /// keep the other two redrawing). The page's clock keeps running while drawing is off, so the scene
+    /// resumes at the right moment instead of being frozen in the past.
+    func setDrawing(_ drawing: Bool, display: CGDirectDisplayID) {
+        guard let slot = slots.first(where: { $0.displayID == display }), let web = slot.web else { return }
+        web.evaluateJavaScript("window.__lwSetPaused && window.__lwSetPaused(\(drawing ? "false" : "true"))",
+                               completionHandler: nil)
+        drawingPaused[display] = !drawing
+    }
+
+    /// Which displays currently have drawing switched off, and why (for --status).
+    private(set) var drawingPaused: [CGDirectDisplayID: Bool] = [:]
+
+    /// A covered wallpaper window is invisible work: everything the canvas draws lands behind someone
+    /// else's window. macOS reports this per window, so pause exactly those displays.
+    func updateOcclusion() {
+        for slot in slots {
+            let visible = slot.window.occlusionState.contains(.visible)
+            setDrawing(visible, display: slot.displayID)
+        }
+    }
+
     /// Tell every page which moment of its day to be at.
     ///
     /// The Lock Screen can only play a looping video, and the extension restarts it on each lock (the
@@ -119,6 +141,7 @@ final class WallpaperHost {
     /// New windows are created before the old ones are retired, so the desktop picture is never
     /// exposed in between (that gap is what looks like the wallpaper "flashing back to the Mac one").
     func show(_ plan: [(screen: NSScreen, wallpaper: Wallpaper)]) {
+        // (windows are laid out below; occlusion is re-checked right after)
         let retiredSlots = slots
         let retiredPlayers = players
         let retiredLoopers = loopers

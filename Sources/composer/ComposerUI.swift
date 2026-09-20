@@ -159,6 +159,13 @@ struct ComposerUI: View {
                     Slider(value: $composer.cloudAlpha, in: 0...6)
                     Text(String(format: "%.1f", composer.cloudAlpha)).monospacedDigit().frame(width: 34)
                 }
+                row("redraw rate") {
+                    Picker("", selection: $composer.fps) {
+                        Text("15").tag(15); Text("20").tag(20); Text("24").tag(24)
+                        Text("30").tag(30); Text("60").tag(60); Text("uncapped").tag(0)
+                    }.labelsHidden().frame(width: 110)
+                    Text("fps (the sky's clock runs regardless)").font(.caption).foregroundStyle(.secondary)
+                }
                 row("stars / cell") {
                     Slider(value: Binding(get: { Double(composer.starsPerCell) },
                                           set: { composer.starsPerCell = Int($0) }), in: 20...160)

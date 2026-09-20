@@ -130,6 +130,7 @@ var CFG = {
   twinkleMin: __TWINKLE_MIN__, twinkleMax: __TWINKLE_MAX__, starFrames: __STAR_FRAMES__,
   screenBuffer: __SCREEN_BUFFER__,
   planetScale: __PLANET_SCALE__, yCenter: __Y_CENTER__,
+  maxDpr: __MAX_DPR__,
   cloudCount: [__CLOUD_MIN__, __CLOUD_MAX__],
   cloudRadius: [__CLOUD_R_MIN__, __CLOUD_R_MAX__],
   cloudSpeed: [__CLOUD_S_MIN__, __CLOUD_S_MAX__],
@@ -156,6 +157,19 @@ var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // requestAnimationFrame callbacks, so the first frame would be drawn before the sprites finish loading
 // and then never again. Redraw once whenever an image arrives, and remember the clock for it.
 var started = false, forcedValue = null, lastSeconds = 0;
+
+// Cost control. The scene is a canvas redrawn every frame and a wallpaper is background art: three
+// displays at 59-100 fps burned ~500 Mpx/s of GPU for motion nobody watches closely. Two dials:
+//   targetFps  — cap the redraw rate (0 = uncapped). The clock keeps advancing either way, so skipping
+//                frames costs nothing in accuracy, only in smoothness.
+//   drawingOff — stop drawing entirely (the host sets this when every wallpaper window is covered by
+//                your own windows). The sky still advances in time, so it is correct on resume.
+var targetFps = __TARGET_FPS__;
+var drawingOff = false;
+var lastDraw = 0;
+window.__lwSetFps = function (value) { targetFps = value || 0; };
+window.__lwSetPaused = function (value) { drawingOff = !!value; };
+window.__lwCost = function () { return { targetFps: targetFps, paused: drawingOff, drawn: frame.count || 0 }; };
 
 // The Lock Screen plays a LOOPING VIDEO, and the extension restarts it on every lock (the freeze
 // workaround), so the clip always begins at its first frame — i.e. at the start of the sky's day. The
@@ -267,7 +281,7 @@ function setupClouds() {
 }
 
 function resize() {
-  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  DPR = Math.min(window.devicePixelRatio || 1, CFG.maxDpr);
   W = window.innerWidth; H = window.innerHeight;
   canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -464,6 +478,8 @@ function start() {
       fps: (window.__lwFrameStats ? window.__lwFrameStats().fps : null),
       frames: (window.__lwFrameStats ? window.__lwFrameStats().frames : null),
       setPhase: typeof window.__lwSetPhase === 'function',      // is this the current page or a cached one?
+      targetFps: targetFps,
+      drawingOff: drawingOff,
       pageSeconds: Math.round(seconds % CFG.dayLength),
       cloudState: cloudImages.map(function (i) { return (i.complete ? 'done' : 'loading') + ':' + i.naturalWidth; }).join(' '),
       horizonWidth: horizonImage.naturalWidth,
@@ -487,6 +503,7 @@ function start() {
     var stillTime = forcedValue !== null ? forcedValue : currentSeconds();
     frame(stillTime);
     setInterval(function () {
+      if (drawingOff) return;
       if (phaseTarget !== null) {
         var nowSeconds = currentSeconds();
         stillTime = nowSeconds - (nowSeconds % CFG.dayLength) + phaseTarget;
@@ -533,6 +550,14 @@ function start() {
     var steps = 0;
     while (accumulator >= STEP && steps < 60) { skyTime += STEP; accumulator -= STEP; steps++; }
     if (frameDeltas.length < 240) frameDeltas.push(delta * 1000);
+    // skip the draw when the cap says so, or when every window is covered; the clock has already
+    // advanced above, so the scene stays at the right moment instead of drifting behind
+    var interval = targetFps > 0 ? 1000 / targetFps : 0;
+    if (drawingOff || (interval > 0 && now - lastDraw < interval)) {
+      requestAnimationFrame(loop);
+      return;
+    }
+    lastDraw = now;
     drawnFrames++;
     frame(forcedValue !== null ? forcedValue : skyTime);
     window.__lwFrameStats = function () {
@@ -603,6 +628,12 @@ def main():
     ap.add_argument("--day-length", type=float, default=600.0,
                     help="seconds per in-game day (stars wheel once per day); planets differ in the game")
     ap.add_argument("--interface-scale", type=float, default=1.0, help="the options interface scale (1 = default)")
+    ap.add_argument("--fps", type=int, default=30,
+                    help="cap the page's redraw rate (0 = uncapped). 30 is plenty for a wallpaper and "
+                         "roughly halves the GPU work of the 60-100 fps default")
+    ap.add_argument("--max-dpr", type=float, default=2.0,
+                    help="cap the canvas backing scale: 2 = retina-sharp (default), 1.5 or 1 trade "
+                         "sharpness of the soft layers for a square-root less GPU work")
     ap.add_argument("--seed", type=int, default=1234567, help="world seed for star/cloud layout")
     ap.add_argument("--stars-per-cell", type=int, default=STAR_CELL_COUNT,
                     help="sky.config stars.cellCount (stars per 180-unit cell)")
@@ -679,6 +710,10 @@ def main():
             args.day_length = plan_in["dayLength"]
         if args.stars_per_cell == STAR_CELL_COUNT and plan_in.get("starsPerCell") is not None:
             args.stars_per_cell = plan_in["starsPerCell"]
+        if args.fps == 30 and plan_in.get("fps") is not None:
+            args.fps = plan_in["fps"]
+        if args.max_dpr == 2.0 and plan_in.get("maxDpr") is not None:
+            args.max_dpr = plan_in["maxDpr"]
         if args.seed == 1234567 and plan_in.get("seed") is not None:
             args.seed = plan_in["seed"]
         if args.moon_size == 1.0 and plan_in.get("moonSize") is not None:
@@ -888,6 +923,8 @@ def main():
             .replace("__SCREEN_BUFFER__", str(SCREEN_BUFFER))
             .replace("__PLANET_SCALE__", str(PLANET_SCALE))
             .replace("__Y_CENTER__", str(Y_CENTER))
+            .replace("__MAX_DPR__", str(args.max_dpr))
+            .replace("__TARGET_FPS__", str(args.fps))
             .replace("__CLOUD_MIN__", str(CLOUD_COUNT[0]))
             .replace("__CLOUD_MAX__", str(CLOUD_COUNT[1]))
             .replace("__CLOUD_R_MIN__", str(CLOUD_RADIUS[0]))
@@ -917,7 +954,8 @@ def main():
         "planet": args.planet, "masks": [int(m) for m in masks], "maskAlpha": args.mask_alpha,
         "shade": bool(args.shade),
         "liquid": liquid, "hueShift": args.hue_shift, "dayLength": args.day_length,
-        "cloudAlpha": args.cloud_alpha, "starsPerCell": args.stars_per_cell, "seed": args.seed,
+        "cloudAlpha": args.cloud_alpha, "starsPerCell": args.stars_per_cell, "fps": args.fps,
+        "maxDpr": args.max_dpr, "seed": args.seed,
         "interfaceScale": args.interface_scale,
         "moonSize": args.moon_size, "planetSize": args.planet_size, "discShadow": args.disc_shadow,
         "engine": {"satelliteArea": list(SATELLITE_AREA), "moonScale": MOON_SCALE,

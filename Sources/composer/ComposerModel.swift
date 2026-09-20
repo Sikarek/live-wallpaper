@@ -165,6 +165,7 @@ final class Composer: ObservableObject {
     // sky
     @Published var cloudAlpha = 3.0
     @Published var starsPerCell = 80
+    @Published var fps = 30                     // canvas redraw rate cap; the clock keeps running
     @Published var dayLength = 600.0                   // seconds per in-game day
 
     // the other bodies
@@ -229,6 +230,7 @@ final class Composer: ObservableObject {
         args += ["--cloud-alpha", String(format: "%.2f", cloudAlpha)]
         args += ["--day-length", String(Int(dayLength.rounded()))]   // whole seconds: the video must match
         args += ["--stars-per-cell", String(starsPerCell)]
+        args += ["--fps", String(fps)]
         args += ["--moons", String(moons)]
         args += ["--moon-types", Array(moonTypes.prefix(moons)).joined(separator: ",")]
         args += ["--parent-planet", parentPlanet]
@@ -246,7 +248,7 @@ final class Composer: ObservableObject {
          String(format: "%.1f", hueShift), String(format: "%.2f", cloudAlpha), String(starsPerCell),
          String(format: "%.1f", dayLength), String(moons), Array(moonTypes.prefix(moons)).joined(separator: ","),
          parentPlanet, String(format: "%.2f", moonSize), String(format: "%.2f", planetSize),
-         String(discShadow), String(seed)].joined(separator: "|")
+         String(discShadow), String(fps), String(seed)].joined(separator: "|")
     }
 
     private var pendingPreview: DispatchWorkItem?
@@ -349,6 +351,7 @@ final class Composer: ObservableObject {
         planetSize = Double.random(in: 0.7...1.6)
         discShadow = Int.random(in: 0...9)
         cloudAlpha = Double.random(in: 1.5...4.5)
+        fps = Int.random(in: 1...2) == 1 ? 30 : 20
         refreshPreview()
     }
 
@@ -378,6 +381,7 @@ final class Composer: ObservableObject {
         let hueShift: Double?
         let cloudAlpha: Double?
         let starsPerCell: Int?
+        let fps: Int?
         let dayLength: Double?
         let seed: Int?
         let moonSize: Double?
@@ -412,6 +416,7 @@ final class Composer: ObservableObject {
         if let value = plan.hueShift { hueShift = value }
         if let value = plan.cloudAlpha { cloudAlpha = value }
         if let value = plan.starsPerCell { starsPerCell = value }
+        if let value = plan.fps { fps = value }
         if let value = plan.dayLength { dayLength = value.rounded() }
         if let value = plan.seed { seed = value }
         if let value = plan.moonSize { moonSize = value }

@@ -113,7 +113,8 @@ enum LockscreenTool {
             reason: "Live wallpaper is on screen")
 
         let argv = CommandLine.arguments
-        let debugRun = argv.contains("--set-target") || argv.contains("--simulate-phase") || argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
+        let debugRun = argv.contains("--set-target") || argv.contains("--simulate-phase")
+            || argv.contains("--simulate-covered") || argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
             || argv.contains("--dump-a11y") || argv.contains("--restore-wallpaper") || argv.contains("--self-test") || argv.contains("--watch") || argv.contains("--simulate-lock")
 
         // One instance only: two of these would stack two sets of wallpaper windows.
@@ -128,6 +129,12 @@ enum LockscreenTool {
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
                                               name: NSApplication.didChangeScreenParametersNotification,
                                               object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(occlusionChanged),
+                                              name: NSApplication.didChangeOcclusionStateNotification,
+                                              object: nil)
+        Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.host.updateOcclusion()
+        }
         // A second launch (Finder double-click, `open`) asks the running instance to show itself.
         DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("com.sikarek.livewallpaper.ping"), object: nil, queue: .main
@@ -240,6 +247,33 @@ enum LockscreenTool {
         if argv.contains("--status") { reportStatus() }
         if argv.contains("--self-test") { runSelfTest() }
         if argv.contains("--restore-wallpaper") { restoreAndExit() }
+        if argv.contains("--simulate-covered") {
+            // prove the covered-window path without needing to cover the desktop
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                for slot in self.host.slots { self.host.setDrawing(false, display: slot.displayID) }
+                NSLog("LIVEWALLPAPER simulate-covered: drawing off on \(self.host.slots.count) display(s)")
+                // measure it: the drawn-frame counter must stop advancing while drawing is off
+                self.host.probe { entries in
+                    for entry in entries { NSLog("LIVEWALLPAPER covered t0: \(entry.label) \(entry.info)") }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    self.host.probe { entries in
+                        for entry in entries { NSLog("LIVEWALLPAPER covered t3: \(entry.label) \(entry.info)") }
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                    for slot in self.host.slots { self.host.setDrawing(true, display: slot.displayID) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        self.host.probe { entries in
+                            for entry in entries {
+                                NSLog("LIVEWALLPAPER simulate-covered resume: \(entry.label) \(entry.info)")
+                            }
+                            exit(0)
+                        }
+                    }
+                }
+            }
+        }
         if let i = argv.firstIndex(of: "--set-target"), i + 1 < argv.count,
            let option = Target(rawValue: argv[i + 1]) {
             Prefs.target = option.rawValue
@@ -643,6 +677,10 @@ enum LockscreenTool {
         NSWorkspace.shared.activateFileViewerSelecting([wallpapersDir])
     }
 
+    @objc private func occlusionChanged() {
+        host.updateOcclusion()
+    }
+
     @objc private func setTarget(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let option = Target(rawValue: raw) else { return }
         Prefs.target = raw
@@ -683,6 +721,12 @@ enum LockscreenTool {
     func reportStatus() {
         NSLog("LIVEWALLPAPER level=\(WallpaperHost.level) desktopIcon=\(Int(CGWindowLevelForKey(.desktopIconWindow))) screens=\(NSScreen.screens.count) windows=\(host.slots.count) sync=\(Prefs.syncDisplays) library=\(model.wallpapers.count)")
         for line in host.statusLines() { NSLog("LIVEWALLPAPER slot \(line)") }
+        for (display, paused) in host.drawingPaused {
+            NSLog("LIVEWALLPAPER display \(display) drawing \(paused ? "OFF (covered)" : "on")")
+        }
+        NSLog("LIVEWALLPAPER occlusion: " + host.slots.map {
+            "\($0.displayID)=\($0.window.occlusionState.contains(.visible) ? "visible" : "covered")"
+        }.joined(separator: " "))
         if let button = statusItem?.button {
             let win = button.window.map { NSStringFromRect($0.frame) } ?? "nil"
             NSLog("LIVEWALLPAPER statusItem button=\(NSStringFromRect(button.frame)) window=\(win) hidden=\(button.isHidden) menuItems=\(statusItem.menu?.items.count ?? -1)")
