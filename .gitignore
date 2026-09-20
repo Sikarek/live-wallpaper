@@ -19,3 +19,6 @@ wallpapers/
 # python
 __pycache__/
 *.pyc
+
+# allow committed screenshots
+!docs/**
