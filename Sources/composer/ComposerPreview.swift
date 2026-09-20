@@ -20,6 +20,9 @@ final class ProbeWebView: WKWebView, WKNavigationDelegate {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func load(page: URL) {
+        // Same reason the wallpaper host does this: a regenerated page keeps its path, so WebKit would
+        // serve the previous HTML from its cache and the run would measure the old code.
+        URLCache.shared.removeAllCachedResponses()
         var url = page
         if let query, var components = URLComponents(url: page, resolvingAgainstBaseURL: false) {
             components.query = query

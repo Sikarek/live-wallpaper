@@ -681,6 +681,7 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
         var query: String?
         var evalScript: String?
         var shotPath: String?
+        var pauseTest = false
         var size = NSSize(width: 1280, height: 720)
         var index = 0
         while index < arguments.count {
@@ -689,6 +690,7 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
             case "--query":  index += 1; if index < arguments.count { query = arguments[index] }
             case "--eval":   index += 1; if index < arguments.count { evalScript = arguments[index] }
             case "--shot":   index += 1; if index < arguments.count { shotPath = arguments[index] }
+            case "--pause-test": pauseTest = true
             case "--size":
                 index += 1
                 if index < arguments.count {
@@ -705,6 +707,48 @@ final class RawProbeDelegate: NSObject, NSApplicationDelegate {
         let view = ProbeWebView(frame: NSRect(origin: .zero, size: size),
                                 configuration: WKWebViewConfiguration())
         view.query = query
+        if pauseTest {
+            // the mechanism that stopped the wallpaper working: pause (the loop must stop), then resume
+            // (the loop must restart and the sky must have advanced by the time spent paused)
+            func cost(_ done: @escaping ([String: Any]) -> Void) {
+                view.evaluateJavaScript("(typeof window.__lwCost === 'function') ? JSON.stringify(window.__lwCost()) : ''") { value, _ in
+                    if let text = value as? String, let data = text.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        done(json)
+                    } else { done([:]) }
+                }
+            }
+            var onProbe: ((String) -> Void)!
+            onProbe = { _ in
+                cost { before in
+                    print("  before pause: \(before)")
+                    view.evaluateJavaScript("window.__lwSetPaused(true)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        cost { paused in
+                            print("  after 2 s paused: \(paused)")
+                            view.evaluateJavaScript("window.__lwSetPaused(false)")
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                cost { resumed in
+                                    print("  after 2 s resumed: \(resumed)")
+                                    let froze = (paused["drawn"] as? Int ?? -1) == (before["drawn"] as? Int ?? -2)
+                                    let slept = (paused["sleeping"] as? Bool) == true
+                                    let woke = (resumed["sleeping"] as? Bool) == false
+                                    let advanced = (resumed["drawn"] as? Int ?? 0) > (paused["drawn"] as? Int ?? 0)
+                                    print(froze && slept && woke && advanced
+                                          ? "PAUSE/RESUME OK — paused stopped the loop, resumed restarted it"
+                                          : "PAUSE/RESUME BROKEN (froze=\(froze) slept=\(slept) woke=\(woke) advanced=\(advanced))")
+                                    exit(froze && slept && woke && advanced ? 0 : 1)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            view.onProbe = onProbe
+            view.load(page: page)
+            keepAlive(view)
+            return                              // the pause path owns onProbe; do not fall through
+        }
         var didEval = false
         view.onProbe = { text in
             if let evalScript, !didEval {

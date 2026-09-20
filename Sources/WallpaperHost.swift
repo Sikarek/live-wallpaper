@@ -45,25 +45,72 @@ final class WallpaperHost {
 
     private(set) var slots: [ScreenSlot] = []
 
+    /// Read the page's own cost report (drawn frames, sleeping state) from one display.
+    func readCost(display: CGDirectDisplayID, completion: @escaping ([String: Any]) -> Void) {
+        guard let slot = slots.first(where: { $0.displayID == display }), let web = slot.web else {
+            completion([:]); return
+        }
+        web.evaluateJavaScript("(typeof window.__lwCost === 'function') ? JSON.stringify(window.__lwCost()) : ''") {
+            value, _ in
+            guard let text = value as? String, let data = text.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                completion([:]); return
+            }
+            completion(json)
+        }
+    }
+
     /// Stop or resume drawing on one display (per display: a window maximised on one monitor should not
     /// keep the other two redrawing). The page's clock keeps running while drawing is off, so the scene
     /// resumes at the right moment instead of being frozen in the past.
     func setDrawing(_ drawing: Bool, display: CGDirectDisplayID) {
         guard let slot = slots.first(where: { $0.displayID == display }), let web = slot.web else { return }
+        if drawingPaused[display] == !drawing { return }        // no change, nothing to report
         web.evaluateJavaScript("window.__lwSetPaused && window.__lwSetPaused(\(drawing ? "false" : "true"))",
                                completionHandler: nil)
         drawingPaused[display] = !drawing
+        NSLog("LIVEWALLPAPER display \(display) drawing \(drawing ? "RESUMED" : "paused (covered)")")
     }
 
     /// Which displays currently have drawing switched off, and why (for --status).
     private(set) var drawingPaused: [CGDirectDisplayID: Bool] = [:]
 
+    /// Is a normal window covering (essentially) this whole display?
+    ///
+    /// NOT `NSWindow.occlusionState`: a wallpaper window lives below the desktop icons, and AppKit
+    /// reports that as "not visible" even on an empty desktop — which latched the pause on permanently
+    /// and stopped the wallpaper drawing entirely. Ask the window server instead: any layer-0 window
+    /// from another app covering ~all of the display counts, a maximised window does not because the
+    /// wallpaper is still visible around it.
+    private func displayIsCovered(_ screen: NSScreen) -> Bool {
+        // Compare in the window server's own space: CGDisplayBounds gives the display rectangle in the
+        // same coordinates as CGWindowListCopyWindowInfo, so nothing has to be converted by hand (doing
+        // that conversion wrong made every display read as covered).
+        let display = WallpaperHost.displayID(of: screen)
+        let frame = CGDisplayBounds(display)
+        let area = frame.width * frame.height
+        guard area > 0, let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                             kCGNullWindowID) as? [[String: Any]] else { return false }
+        for entry in list {
+            guard let layer = entry[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+            if (entry[kCGWindowOwnerPID as String] as? Int) == Int(getpid()) { continue }   // our own window
+            guard let bounds = entry[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { continue }
+            let overlap = rect.intersection(frame)
+            if overlap.width * overlap.height > area * 0.97 {
+                let owner = entry[kCGWindowOwnerName as String] as? String ?? "?"
+                NSLog("LIVEWALLPAPER display \(display) counted as covered by \"\(owner)\" \(NSStringFromRect(rect))")
+                return true
+            }
+        }
+        return false
+    }
+
     /// A covered wallpaper window is invisible work: everything the canvas draws lands behind someone
-    /// else's window. macOS reports this per window, so pause exactly those displays.
+    /// else's window. Pause exactly those displays, and only those.
     func updateOcclusion() {
         for slot in slots {
-            let visible = slot.window.occlusionState.contains(.visible)
-            setDrawing(visible, display: slot.displayID)
+            setDrawing(!displayIsCovered(slot.screen), display: slot.displayID)
         }
     }
 

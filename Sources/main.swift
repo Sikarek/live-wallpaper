@@ -114,7 +114,8 @@ enum LockscreenTool {
 
         let argv = CommandLine.arguments
         let debugRun = argv.contains("--set-target") || argv.contains("--simulate-phase")
-            || argv.contains("--simulate-covered") || argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
+            || argv.contains("--simulate-covered") || argv.contains("--pause-test")
+            || argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
             || argv.contains("--dump-a11y") || argv.contains("--restore-wallpaper") || argv.contains("--self-test") || argv.contains("--watch") || argv.contains("--simulate-lock")
 
         // One instance only: two of these would stack two sets of wallpaper windows.
@@ -247,6 +248,39 @@ enum LockscreenTool {
         if argv.contains("--status") { reportStatus() }
         if argv.contains("--self-test") { runSelfTest() }
         if argv.contains("--restore-wallpaper") { restoreAndExit() }
+        if argv.contains("--pause-test") {
+            // Pause and resume ONE visible display and watch its own frame counter. This has to run here,
+            // in a real on-screen window: an off-screen WKWebView never delivers requestAnimationFrame, so
+            // a probe tool cannot exercise the animated path at all (it silently measures the still branch).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
+                guard let display = self.host.slots.first?.displayID else {
+                    print("no slot"); exit(2)
+                }
+                self.host.readCost(display: display) { before in
+                    print("  before pause: \(before)")
+                    self.host.setDrawing(false, display: display)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self.host.readCost(display: display) { paused in
+                            print("  after 2 s paused: \(paused)")
+                            self.host.setDrawing(true, display: display)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                self.host.readCost(display: display) { resumed in
+                                    print("  after 2 s resumed: \(resumed)")
+                                    let froze = (paused["drawn"] as? Int ?? -1) == (before["drawn"] as? Int ?? -2)
+                                    let slept = (paused["sleeping"] as? Bool) == true
+                                    let woke = (resumed["sleeping"] as? Bool) == false
+                                    let advanced = (resumed["drawn"] as? Int ?? 0) > (paused["drawn"] as? Int ?? 0)
+                                    print(froze && slept && woke && advanced
+                                          ? "PAUSE/RESUME OK — paused stopped the loop, resumed restarted it"
+                                          : "PAUSE/RESUME BROKEN (froze=\(froze) slept=\(slept) woke=\(woke) advanced=\(advanced))")
+                                    exit(froze && slept && woke && advanced ? 0 : 1)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if argv.contains("--simulate-covered") {
             // prove the covered-window path without needing to cover the desktop
             DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {

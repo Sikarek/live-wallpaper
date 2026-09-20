@@ -157,7 +157,8 @@ var planetRatio = 1, pixelRatio = 1, view = { w: 0, h: 0 };
 var horizonImage = new Image();
 var cloudImages = [], starSheets = [], starFrameSize = [], orbiterImages = [];
 var clouds = [], starTypes = [], starField = [];
-var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches
+  && !/[?&]motion=1/.test(location.search);      // ?motion=1 forces the animated path (tests, previews)
 // A web view that is not on screen (an offscreen preview, a hidden window, a test) never gets
 // requestAnimationFrame callbacks, so the first frame would be drawn before the sprites finish loading
 // and then never again. Redraw once whenever an image arrives, and remember the clock for it.
@@ -174,20 +175,13 @@ var drawingOff = false;
 var lastDraw = 0;
 var sleeping = false, sleepStartedAt = null, loopTicks = 0;
 window.__lwSetFps = function (value) { targetFps = value || 0; };
-// Pausing has to stop the requestAnimationFrame loop itself, not just skip the work inside it: a loop
-// still running at 100 Hz keeps the CPU and the compositor awake for nothing. The sky's clock is
-// corrected by the time spent asleep, so it resumes where it belongs rather than where it stopped.
-window.__lwSetPaused = function (value) {
-  var next = !!value;
-  if (next === sleeping) return;
-  if (next) { sleeping = true; sleepStartedAt = performance.now(); }
-  else {
-    if (sleepStartedAt !== null) { skyTime += (performance.now() - sleepStartedAt) / 1000; }
-    sleepStartedAt = null; sleeping = false; lastDraw = 0; accumulator = 0;
-    requestAnimationFrame(function (now) { lastNow = now; loop(now); });
-  }
+// __lwSetPaused is defined INSIDE start(), where the loop's variables live. Defined out here it could
+// pause but not resume — requestAnimationFrame(loop) and skyTime are start()'s locals — so the first
+// covered display froze the wallpaper permanently.
+window.__lwCost = function () {
+  return { targetFps: targetFps, sleeping: sleeping, drawn: (typeof frame === 'function' ? (frame.count || 0) : 0),
+           ticks: loopTicks, phaseSeconds: Math.round((lastSeconds || 0) % CFG.dayLength) };
 };
-window.__lwCost = function () { return { targetFps: targetFps, paused: drawingOff, drawn: frame.count || 0 }; };
 
 // The Lock Screen plays a LOOPING VIDEO, and the extension restarts it on every lock (the freeze
 // workaround), so the clip always begins at its first frame — i.e. at the start of the sky's day. The
@@ -539,6 +533,28 @@ function start() {
   // Everything drawn is then a pure linear function of that time (no easing, no keyframes, no
   // restarts), which is what makes it read as perfectly smooth rather than "animated".
   // -------------------------------------------------------------------------------------------
+  // Pausing has to stop the requestAnimationFrame loop itself, not just skip the work inside it: a loop
+  // still running at 100 Hz keeps the CPU and the compositor awake for nothing. The sky's clock is
+  // corrected by the time spent asleep, so it resumes where it belongs rather than where it stopped.
+  window.__lwSetPaused = function (value) {
+    var next = !!value;
+    if (next === sleeping) return;
+    if (next) {
+      sleeping = true;
+      sleepStartedAt = performance.now();
+    } else {
+      if (sleepStartedAt !== null && typeof skyTime === 'number') {
+        skyTime += (performance.now() - sleepStartedAt) / 1000;
+      }
+      sleepStartedAt = null;
+      sleeping = false;
+      lastDraw = 0;
+      accumulator = 0;
+      lastNow = performance.now();
+      requestAnimationFrame(loop);             // in scope here, which is the point
+    }
+  };
+
   var STEP = 1 / 60;
   var skyTime = currentSeconds();              // absolute phase: a reload continues where it was
   var lastNow = performance.now();
@@ -546,7 +562,7 @@ function start() {
   var frameDeltas = [];
   var drawnFrames = 0;
 
-  (function loop(now) {
+  var loop = function (now) {
     if (sleeping) return;
     loopTicks++;                                // rAF callbacks, drawn or not                       // no callback, no wake-up, no energy
     var delta = (now - lastNow) / 1000;
@@ -588,7 +604,8 @@ function start() {
       };
     };
     requestAnimationFrame(loop);
-  })(lastNow);
+  };
+  loop(lastNow);
 }
 
 start();
