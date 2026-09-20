@@ -12,11 +12,23 @@ final class WallpaperWindow: NSWindow {
 }
 
 /// Web view that reports when its page finished loading, so the host can inject the sync script.
+/// Also self-heals: macOS/WebKit can terminate the content process (memory pressure, suspension),
+/// which blanks the desktop until something reloads it.
 final class SlotWebView: WKWebView, WKNavigationDelegate {
     var onReady: (() -> Void)?
+    private var lastRecovery = Date.distantPast
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         onReady?()
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        let now = Date()
+        NSLog("LIVEWALLPAPER web content terminated — reloading")
+        // don't hammer: at most one recovery every 5 s
+        guard now.timeIntervalSince(lastRecovery) > 5 else { return }
+        lastRecovery = now
+        webView.reload()
     }
 }
 
@@ -69,10 +81,17 @@ final class WallpaperHost {
     // MARK: show / teardown
 
     /// `plan` has one entry per display; entries may use different wallpapers.
+    /// New windows are created before the old ones are retired, so the desktop picture is never
+    /// exposed in between (that gap is what looks like the wallpaper "flashing back to the Mac one").
     func show(_ plan: [(screen: NSScreen, wallpaper: Wallpaper)]) {
-        teardown()
+        let retiredSlots = slots
+        let retiredPlayers = players
+        let retiredLoopers = loopers
+        slots = []
+        players = []
+        loopers = []
+
         paused = false
-        epoch = Date().timeIntervalSince1970 * 1000
 
         // Video: ONE player per distinct video wallpaper, one layer per screen — identical frames on
         // every display by construction, and only one decode.
@@ -98,6 +117,15 @@ final class WallpaperHost {
         }
 
         for slot in slots { slot.window.orderFront(nil) }
+
+        // now the old layer can go away — the new one already covers every display
+        for slot in retiredSlots {
+            slot.window.orderOut(nil)
+            slot.window.contentView = nil
+        }
+        for p in retiredPlayers { p.pause() }
+        _ = retiredLoopers
+
         startSyncTimer()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.checkGeometry() }
         onChange?()
@@ -128,7 +156,9 @@ final class WallpaperHost {
         window.ignoresMouseEvents = true          // click-through
         window.hasShadow = false
         window.isOpaque = true
-        window.backgroundColor = .black
+        // scene colour, not black: while a page loads/reloads the window keeps painting this instead
+        // of flashing white (WebKit's default) or letting the desktop show through
+        window.backgroundColor = NSColor(calibratedRed: 0.016, green: 0.024, blue: 0.051, alpha: 1)
         window.isReleasedWhenClosed = false
 
         var slot = ScreenSlot(screen: screen, displayID: Self.displayID(of: screen), window: window,
@@ -150,6 +180,10 @@ final class WallpaperHost {
                                    configuration: WKWebViewConfiguration())
             view.autoresizingMask = [.width, .height]
             view.navigationDelegate = view          // without this onReady never fires
+            // transparent page background: the window's scene colour shows during load/first paint
+            if view.responds(to: NSSelectorFromString("setDrawsBackground:")) {
+                view.setValue(false, forKey: "drawsBackground")
+            }
             view.onReady = { [weak self, weak view] in
                 guard let self, let view else { return }
                 self.injectHostScript(into: view)

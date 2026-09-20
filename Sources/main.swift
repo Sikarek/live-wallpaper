@@ -18,15 +18,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = AppModel()
     var statusItem: NSStatusItem!
     var window: NSWindow?
+    var activity: NSObjectProtocol?
+    /// the display layout we last built windows for, to ignore spurious change notifications
+    var lastLayoutSignature = ""
 
     // MARK: lifecycle
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
+        // A wallpaper looks like a background app to macOS: without this, App Nap throttles the
+        // timers/WebKit and automatic termination can kill us — which shows up as the wallpaper
+        // freezing, or vanishing back to the Mac wallpaper.
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .automaticTerminationDisabled,
+                      .suddenTerminationDisabled],
+            reason: "Live wallpaper is on screen")
+
         let argv = CommandLine.arguments
         let debugRun = argv.contains("--status") || argv.contains("--seconds") || argv.contains("--dump-ui")
-            || argv.contains("--dump-a11y") || argv.contains("--self-test")
+            || argv.contains("--dump-a11y") || argv.contains("--self-test") || argv.contains("--watch")
 
         // One instance only: two of these would stack two sets of wallpaper windows.
         if !debugRun, let id = Bundle.main.bundleIdentifier,
@@ -69,6 +80,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.applyPlan()
         }
 
+        if argv.contains("--watch") {
+            var n = 0
+            Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+                n += 1
+                self.host.probe { entries in
+                    for e in entries {
+                        NSLog("LIVEWALLPAPER watch t=\(n * 2)s \(e.label) \(e.info)")
+                    }
+                }
+            }
+        }
         if argv.contains("--status") { reportStatus() }
         if argv.contains("--self-test") { runSelfTest() }
 
@@ -93,10 +115,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Any change to the display layout — count, resolution, arrangement — rebuilds every window from
     /// the current screen list, so each display keeps its own wallpaper at its own new geometry.
+    /// macOS also fires this notification spuriously (observed every ~2 s on this machine); acting on
+    /// those re-created every window and reloaded every page, which is what made the desktop picture
+    /// flash back. So: only rebuild when the layout actually differs from what we laid out.
     @objc func screensChanged() {
-        NSLog("LIVEWALLPAPER displays changed: " + NSScreen.screens.map { WallpaperHost.describe($0) }.joined(separator: " | "))
+        let signature = screenSignature()
+        guard signature != lastLayoutSignature else { return }
+        lastLayoutSignature = signature
+        NSLog("LIVEWALLPAPER displays changed: \(signature)")
         model.refreshDisplays()
         applyPlan()
+    }
+
+    func screenSignature() -> String {
+        NSScreen.screens.map { screen in
+            "\(WallpaperHost.displayID(of: screen))@\(NSStringFromRect(screen.frame))x\(screen.backingScaleFactor)"
+        }.sorted().joined(separator: "|")
     }
 
     // MARK: model wiring
@@ -175,6 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applyPlan() {
         let plan = resolvePlan()
         guard !plan.isEmpty else { return }
+        lastLayoutSignature = screenSignature()     // remember what we laid out for
         host.show(plan)
         syncModel()
         rebuildMenu()

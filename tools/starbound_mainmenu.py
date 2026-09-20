@@ -100,6 +100,9 @@ var CFG = {
 
 var canvas = document.getElementById('sky');
 var ctx = canvas.getContext('2d');
+// Fixed origin (2025-01-01T00:00:00Z), not "the moment this page loaded": a reload or an app relaunch
+// then continues the sky exactly where it was instead of snapping back to the start of the cycle.
+var EPOCH_BASE = 1735689600000;
 var W = 0, H = 0, DPR = 1;
 var planetRatio = 1, pixelRatio = 1, view = { w: 0, h: 0 };
 var horizonImage = new Image();
@@ -272,8 +275,11 @@ function frame(seconds) {
   if (typeof frame.count !== 'number') frame.count = 0;
   frame.count++;
   var day = seconds % CFG.dayLength;
-  var starRotation = 2 * Math.PI * day / CFG.dayLength;    // StarSky.cpp:204
-  var orbitAngle = 2 * Math.PI * day / CFG.dayLength;      // StarSky::orbitAngle()
+  var starRotation = 2 * Math.PI * day / CFG.dayLength;    // StarSky.cpp:204 (2pi wrap is seamless
+                                                           // for a random field, so no jump)
+  var orbitAngle = 2 * Math.PI * seconds / CFG.dayLength;   // NOT wrapped: cloud speeds are
+                                                            // fractional, so wrapping would make the
+                                                            // clouds jump once per day
   var t = seconds;
 
   window.__lwStarDrawn = 0;
@@ -307,6 +313,7 @@ function start() {
       planetRatio: Math.round(planetRatio * 1000) / 1000,
       starRotation: Math.round(2 * Math.PI * (seconds % CFG.dayLength) / CFG.dayLength * 1000) / 1000,
       orbitAngle: Math.round(2 * Math.PI * (seconds % CFG.dayLength) / CFG.dayLength * 1000) / 1000,
+      frames: frame.count,
       starsDrawn: window.__lwStarCount || 0,
       clouds: clouds.length,
       cloudsDrawn: window.__lwCloudsDrawn || 0,
@@ -318,16 +325,22 @@ function start() {
     });
   };
 
-  function currentSeconds() { return (Date.now() - (window.__lwEpoch || 0)) / 1000; }
+  function currentSeconds() { return (Date.now() - EPOCH_BASE) / 1000; }
 
   if (reduceMotion) {
     frame(forced !== null ? parseFloat(forced) : 0);
     return;
   }
-  (function loop() {
-    frame(forced !== null ? parseFloat(forced) : currentSeconds());
+  var lastDraw = -1000;
+  (function loop(now) {
+    // ~30 fps: this sky moves slowly, and halving the redraw rate halves the load on the WebKit
+    // content process (which is what macOS may otherwise suspend or kill)
+    if (forced !== null || now - lastDraw >= 32) {
+      lastDraw = now;
+      frame(forced !== null ? parseFloat(forced) : currentSeconds());
+    }
     requestAnimationFrame(loop);
-  })();
+  })(0);
 }
 
 start();

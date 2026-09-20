@@ -89,6 +89,17 @@ page receives CSS variables it can adapt to — `--screen-width`, `--screen-heig
 A geometry self-check a second after applying corrects a stale first-pass display arrangement, which
 the window server sometimes hands a freshly launched process.
 
+macOS also fires `didChangeScreenParametersNotification` spuriously — measured **every ~2 seconds** on
+this machine. Acting on those re-created every window and reloaded every page, which showed up as the
+desktop picture flashing back to the Mac wallpaper. The app now keys off a *layout signature*
+(display ids + frames + scales) and only rebuilds when the layout genuinely differs.
+
+Related smoothness work: new windows are created before the old ones are retired (no uncovered gap),
+a `ProcessInfo` activity keeps App Nap / automatic termination from suspending the WebKit content,
+terminated content processes reload themselves, the page background is transparent so the window's
+scene colour shows during a load, the title wallpaper's clock starts from a fixed origin (so a reload
+or relaunch continues the sky instead of snapping back), and the canvas draws at ~30 fps.
+
 Run the whole thing as a test:
 
 ```bash
