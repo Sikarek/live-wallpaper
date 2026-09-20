@@ -93,8 +93,8 @@ Run the whole thing as a test:
 
 ```bash
 ./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --self-test
-# 14 checks: geometry per display, resolution adaptation, phase sync, per-display assignment,
-# shared video player, dynamic resize, display-change rebuild. Exit code 0 = all passed.
+# 14-15 checks: geometry per display, resolution adaptation, phase sync, motion, per-display
+# assignment, shared video player, dynamic resize, display-change rebuild. Exit code 0 = passed.
 ```
 
 ### Opening it, and the `-10825` gotcha
@@ -178,6 +178,37 @@ python3 tools/starbound_unpack.py --list 'nebula|starfield'
 python3 tools/starbound_unpack.py --extract '^/interface/title/.*\.png$' --out ./out
 ```
 
+## Starbound main menu (animated title screen)
+
+`tools/starbound_mainmenu.py` rebuilds the title screen exactly as the engine draws it, motion included.
+The game's own data says what it is and what moves:
+
+```
+/interface/windowconfig/title.config   skyBackdropDarken [0,0,0,100] -> backdrop darkened 39%
+/celestial.config                      horizon = textures/<planet>_<l|r>.png + 3 masks + atmosphere
+/sky.config                            stars.cellSize 180, cellCount 80, twinkle 1..2.5, frames 4
+                                       planetHorizon.scale 0.5, yCenter -700, 30-60 clouds,
+                                       cloudRadius 740..810, cloudSpeed 0.2..0.3
+OpenStarbound (public 1.4.4 sources):
+  frontend/StarTitleScreen.cpp         layer order + the pixel ratios
+  game/StarSky.cpp:204                 starRotation += dt / dayLength * 2pi   (sky wheels once a day)
+  game/StarSky.cpp:332                 orbitAngle = 2pi * timeOfDay / dayLength
+  game/StarSkyRenderData.cpp           clouds orbit the planet centre below the bottom edge
+  rendering/StarEnvironmentPainter.cpp star frames twinkle on the epoch clock; sprites drawn 1:1
+```
+
+The wallpaper does that on a canvas: real 4-frame star sprites twinkling, the starfield wheeling once
+per `--day-length` seconds, and the game's own cloud sprites orbiting the planet limb. Append
+`?t=<seconds>` to the page URL to render a fixed moment (the tests use it).
+
+```bash
+python3 tools/starbound_mainmenu.py                       # garden planet, 600 s day
+python3 tools/starbound_mainmenu.py --planet midnight --day-length 300
+python3 tools/starbound_mainmenu.py --cloud-alpha 1.0     # literal engine alpha (the wisps are ~7%)
+```
+
+Measured: 82,989 px (5.6% of the frame) change across 36 degrees of star rotation.
+
 ## Performance (measured, M2 Max, 3 displays incl. a 1512x982 Retina built-in)
 
 | content | CPU (whole process tree) |
@@ -197,7 +228,7 @@ The app has hidden flags used to verify it is really on screen:
 ```bash
 ./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --status                 # levels, status item, what each page rendered
 ./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --seconds 5              # run for 5 s and exit
-./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --self-test              # 14 end-to-end checks, exit 0 = all passed
+./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --self-test              # 14-15 end-to-end checks, exit 0 = all passed
 ./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --self-test --wallpaper videoloop
 ./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --wallpaper jades-drift  # override the saved choice
 ./build/LiveWallpaper.app/Contents/MacOS/LiveWallpaper --dump-a11y              # the window's accessibility tree

@@ -281,7 +281,7 @@ final class WallpaperHost {
           var value = list[i].currentTime;
           times.push(value === null ? -1 : Math.round(value));
         }
-        return JSON.stringify({
+        var out = {
           url: location.pathname,
           title: document.title,
           w: window.innerWidth,
@@ -289,7 +289,15 @@ final class WallpaperHost {
           dpr: window.devicePixelRatio,
           anim: times,
           epoch: window.__lwEpoch
-        });
+        };
+        // a canvas wallpaper may publish its own animation state (e.g. the Starbound title screen)
+        try {
+          if (window.__lwTitleInfo) {
+            var extra = JSON.parse(window.__lwTitleInfo());
+            for (var k in extra) { out['lw_' + k] = extra[k]; }
+          }
+        } catch (e) {}
+        return JSON.stringify(out);
       };
     })();
     """#

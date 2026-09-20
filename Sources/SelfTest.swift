@@ -120,6 +120,33 @@ extension AppDelegate {
             }
         }
 
+        // 2b. the wallpaper is genuinely animating (not a still image)
+        steps.append { next in
+            probeWithRetry(3) { first in
+                let rotationBefore = first.compactMap { $0["lw_starRotation"] as? Double }.first
+                let cloudBefore = first.compactMap { $0["lw_cloudHash"] as? Int }.first
+                guard rotationBefore != nil || cloudBefore != nil else {
+                    record(true, "wallpaper publishes animation state",
+                           "skipped: this wallpaper does not expose __lwTitleInfo")
+                    return next()
+                }
+                after(3.0) {
+                    probeWithRetry(3) { second in
+                        let rotationAfter = second.compactMap { $0["lw_starRotation"] as? Double }.first
+                        let cloudAfter = second.compactMap { $0["lw_cloudHash"] as? Int }.first
+                        let rotated = (rotationBefore != nil && rotationAfter != nil)
+                            ? abs(rotationAfter! - rotationBefore!) > 0.0005 : false
+                        let cloudsMoved = (cloudBefore != nil && cloudAfter != nil)
+                            ? cloudBefore! != cloudAfter! : false
+                        record(rotated || cloudsMoved, "wallpaper animation advances over time",
+                               "starRotation \(rotationBefore ?? -1) -> \(rotationAfter ?? -1), " +
+                               "cloudHash \(cloudBefore ?? 0) -> \(cloudAfter ?? 0)")
+                        next()
+                    }
+                }
+            }
+        }
+
         // 3. per-display wallpapers: different wallpaper on alternating displays
         steps.append { next in
             let usable = self.model.wallpapers.filter { $0.kind != .image }
