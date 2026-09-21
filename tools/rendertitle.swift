@@ -364,7 +364,8 @@ func drawFrame(context ctx: CGContext, time t: Double) {
             let dy = orbiter.y * areaY
             let x = viewW / 2 + dx * cosR - dy * sinR
             let y = 0 + dx * sinR + dy * cosR
-            let scale = orbiter.scale * (imageScales[orbiter.type] ?? 0.1125) * pixelRatio
+            // quarter, like the canvas: the engine's disc textures are 4x art (view units = pixels / 4)
+            let scale = orbiter.scale * (imageScales[orbiter.type] ?? 0.1125) * pixelRatio / 4
             let ow = Double(image.width) * scale, oh = Double(image.height) * scale
             let px = x * pixelRatio, py = y * pixelRatio
             if px + ow / 2 < 0 || px - ow / 2 > Double(width) { continue }

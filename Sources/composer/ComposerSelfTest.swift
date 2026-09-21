@@ -335,7 +335,7 @@ struct BackdropPlan: Decodable {
 /// The engine's own placement maths, implemented a second time in Swift: if this and the page agree,
 /// the discs really are where backOrbiters() says they should be.
 func expectedOrbiters(_ plan: BackdropPlan, seconds: Double, viewW: Double, viewH: Double,
-                      interfaceScale: Double = 1.0, discSize: Double = 542)
+                      interfaceScale: Double = 1.0, discSize: Double = 135.5)   // 542px art / 4
     -> [(type: String, x: Int, y: Int, size: Int)] {
     let pixelRatio = 0.125 + ((viewH / 1080.0) * 3.0 - 0.125) * interfaceScale
     // the page works in VIEW units (screen px / pixelRatio) and only scales to pixels when drawing

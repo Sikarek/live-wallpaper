@@ -371,7 +371,10 @@ function drawOrbiters(starRotation) {
     var dy = o.y * CFG.satelliteArea[1] - cy;
     var x = cx + dx * cos - dy * sin;
     var y = cy + dx * sin + dy * cos;
-    var scale = o.scale * (CFG.imageScale[o.type] || 0.1125) * pixelRatio;
+    // The engine's textures are 4x art: a 542px disc is 135.5 VIEW units, which is why the divisor
+    // belongs here. Without it every moon and planet came out about four times too large — the in-game
+    // main-menu backdrop puts the planet you orbit at ~19% of the frame height, not half the screen.
+    var scale = o.scale * (CFG.imageScale[o.type] || 0.1125) * pixelRatio / 4;
     var w = img.naturalWidth * scale, h = img.naturalHeight * scale;
     var px = x * pixelRatio, py = y * pixelRatio;      // px from the bottom edge
     if (px + w / 2 < 0 || px - w / 2 > W) continue;    // off-screen sideways
