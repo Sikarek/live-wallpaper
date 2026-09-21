@@ -76,6 +76,21 @@ MOON_SCALE = 1.5                      # sky.config satellite.moonScale
 PARENT_SCALE = 3.0                    # sky.config satellite.planetScale
 SHADOW_NUMBERS = 9                    # terrestrialGraphics.shadowNumber [1,9]
 BASE_COUNT = {"garden": 5, "savannah": 4, "snow": 4, "toxic": 2}   # terrestrialGraphics baseCount
+
+# terrestrialGraphics.<biome>.dynamicsImages + dynamicsRange, verbatim from celestial.config. These are
+# the CONTINENT masks: each stacked colour layer is drawn clipped to one of them ("?addmask="), which is
+# what puts landmasses on a disc. Stacking the layers without their mask paints the whole disc in the
+# darkest layer's colour — a flat circle, which is what the sky bodies looked like before this.
+DYNAMICS_DEFAULT = ("arid", 1, 50)
+DYNAMICS = {
+    "arctic": ("ocean", 1, 20), "forest": ("temperate", 1, 30), "garden": ("temperate", 1, 30),
+    "jungle": ("temperate", 1, 30), "savannah": ("temperate", 1, 30), "volcanic": ("temperate", 1, 30),
+    "alien": ("temperate", 1, 30), "scorchedcity": ("temperate", 1, 30), "toxic": ("temperate", 1, 30),
+    "ocean": ("ocean", 1, 20), "magma": ("ocean", 1, 20),
+    "moon": ("arid", 1, 50), "desert": ("arid", 1, 50), "snow": ("arid", 1, 50),
+    "tundra": ("arid", 1, 50), "midnight": ("arid", 1, 30), "barren": ("arid", 1, 50),
+}
+DYNAMICS_DIR = "/celestial/system/terrestrial/dynamics"
 IMAGE_SCALE = {"moon": 0.125, "barren": 0.1}                       # planetaryTypes variationParameters
 DEFAULT_IMAGE_SCALE = 0.1125          # terrestrial tiers 1-6 (0.1 / 0.125)
 DISC_BIOMES = ["alien", "arctic", "barren", "desert", "forest", "garden", "jungle", "magma", "midnight",
@@ -819,8 +834,12 @@ def main():
         else:
             if liquid:
                 stack.append((f"{DISC_LIQUID_DIR}/{liquid}.png", 0, None, None))
+            chunk, low, high = DYNAMICS.get(orbiter["type"], DYNAMICS_DEFAULT)
             for n in range(BASE_COUNT.get(orbiter["type"], 3), 0, -1):
                 stack.append((f"{DISC_DIR}/{orbiter['type']}/maskie{n}.png", 0, None, None))
+                dynamics = rng.randint(low, high)
+                stack.append((f"{DYNAMICS_DIR}/{chunk}/{dynamics}.png", 0, None, None))
+                orbiter.setdefault("layers", []).append({"maskie": n, "dynamics": dynamics, "chunk": chunk})
             orbiter["shadow_path"] = f"{DISC_SHADOW_DIR}/{orbiter['shadow']}.png"
             stack.append((orbiter["shadow_path"], 0, None, None))
         orbiter["stack"] = stack
@@ -942,12 +961,34 @@ def main():
             cmd += ["--over", os.path.join(inside, os.path.basename(orbiter["shadow_path"]))]
             run_compositor(cmd)
         else:
-            # the stack entries are (pak path, hue, mask path, dynamics); their extracted names live in
-            # discsrc<i>/ under the pak basename
-            locals_ = [os.path.join(inside, os.path.basename(pak_path)) for pak_path, _, _, _ in orbiter["stack"]]
-            size = png_size(os.path.join(assets, locals_[0]))
-            run_compositor([os.path.join(assets, orbiter["image"]), str(size[0]), str(size[1]),
-                            "--stack"] + locals_)
+            # The engine's stack for a disc, in order:
+            #   base  = maskie<baseCount>                      (a full disc of the lightest colour)
+            #   then  = maskie<baseCount..1>, each ONE clipped to its own dynamics mask ("?addmask=")
+            #           -> the continent shapes, in progressively darker shades
+            #   then  = a shadow sprite
+            # Clipping is what makes the landmasses: without it the darkest layer covers everything.
+            base = os.path.join(inside, os.path.basename(orbiter["stack"][0][0]))
+            size = png_size(os.path.join(assets, base))
+            out_png = os.path.join(assets, orbiter["image"])
+            plates = []
+            for layer in orbiter.get("layers", []):
+                shape = f"dyn-{layer['dynamics']}.png"
+                clipped = f"land-{layer['maskie']}.png"
+                dynamic = os.path.join(inside, os.path.basename(
+                    next(p for p, _, _, _ in orbiter["stack"] if p.endswith(f"/{layer['dynamics']}.png")
+                         and f"/{layer['chunk']}/" in p)))
+                # the continent shape, then that shade clipped to it
+                run_compositor([shape, str(size[0]), str(size[1]), "--over", dynamic])
+                run_compositor([clipped, str(size[0]), str(size[1]), "--over", shape,
+                                "--atop", "1.0", os.path.join(inside, f"maskie{layer['maskie']}.png")])
+                plates.append(clipped)
+            # one canvas for the disc: the compositor always starts blank, so every layer has to be in
+            # the same call — writing it incrementally just replaced the file with the last layer
+            final = [out_png, str(size[0]), str(size[1]), "--over", base]
+            for plate in plates:
+                final += ["--over", plate]
+            final += ["--over", os.path.join(inside, os.path.basename(orbiter["shadow_path"]))]
+            run_compositor(final)
 
     html = (HTML
             .replace("__DAYLENGTH__", str(args.day_length))
@@ -1000,7 +1041,7 @@ def main():
                    "imageScale": IMAGE_SCALES},
         "orbiters": [{"x": o["x"], "y": o["y"], "type": o["type"], "scale": o["scale"],
                       "image": o["image"], "kind": o.get("kind", "disc"),
-                      "shadow": o.get("shadow"), "gas": o.get("gas"),
+                      "shadow": o.get("shadow"), "gas": o.get("gas"), "layers": o.get("layers"),
                       "parent": o.get("parent", False)} for o in orbiters],
     }
     with open(os.path.join(out, "backdrop.json"), "w") as g:
