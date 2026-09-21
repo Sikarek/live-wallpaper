@@ -185,49 +185,104 @@ struct ComposerUI: View {
 
     private var bodiesBox: some View {
         GroupBox("Moons & planet in the sky") {
-            VStack(alignment: .leading, spacing: 6) {
-                row("moons") {
-                    Stepper(value: $composer.moons, in: 0...3) { Text("\(composer.moons)") }
-                        .frame(width: 120)
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(composer.bodies.enumerated()), id: \.element.id) { index, _ in
+                    bodyEditor(index)
                 }
-                ForEach(0..<max(0, composer.moons), id: \.self) { i in
-                    row("moon \(i + 1)") {
-                        Picker("", selection: Binding(
-                            get: { composer.moonTypes.indices.contains(i) ? composer.moonTypes[i] : "moon" },
-                            set: { new in
-                                var t = composer.moonTypes
-                                while t.count <= i { t.append("moon") }
-                                t[i] = new
-                                composer.moonTypes = t
-                            })) {
-                            ForEach(composer.planetChoices, id: \.self) { Text($0).tag($0) }
-                        }.labelsHidden().frame(width: 160)
+                HStack(spacing: 8) {
+                    Button("＋ moon") {
+                        var body = Composer.Body()
+                        body.type = composer.planetChoices.first ?? "moon"
+                        body.seed = Int.random(in: 1...9_999_999)
+                        composer.bodies.append(body)
+                        composer.schedulePreview()
                     }
+                    .disabled(composer.bodies.filter { !$0.isParent }.count >= 3)
+                    Button("＋ parent planet") {
+                        var body = Composer.Body()
+                        body.type = "gasgiant"
+                        body.isParent = true
+                        body.seed = Int.random(in: 1...9_999_999)
+                        composer.bodies.append(body)
+                        composer.schedulePreview()
+                    }
+                    .disabled(composer.bodies.contains { $0.isParent })
+                    Spacer()
                 }
-                row("parent planet") {
-                    Picker("", selection: $composer.parentPlanet) {
-                        ForEach(composer.worldChoices, id: \.self) { Text($0).tag($0) }
-                    }.labelsHidden().frame(width: 160)
-                }
-                row("moon size") {
-                    Slider(value: $composer.moonSize, in: 0.3...2.5)
-                    Text(String(format: "%.1fx", composer.moonSize)).monospacedDigit().frame(width: 44)
-                }
-                row("planet size") {
-                    Slider(value: $composer.planetSize, in: 0.3...2.5)
-                    Text(String(format: "%.1fx", composer.planetSize)).monospacedDigit().frame(width: 44)
-                }
-                row("disc shadow") {
-                    Picker("", selection: $composer.discShadow) {
-                        Text("from seed").tag(0)
-                        ForEach(composer.palette?.shadows ?? [], id: \.self) { Text("\($0)").tag($0) }
-                    }.labelsHidden().frame(width: 120)
-                }
-                Text("Sizes are multipliers on the engine's own scales (moons 1.5×, the planet you orbit 3.0×).")
+                Text("Every value the engine derives for a body is here: size, hue, which shadow sprite, "
+                     + "where it sits, and a seed that re-rolls its continents. gasgiant is sky-only (the "
+                     + "game has no horizon art for them). -1 / 0 means \u{201C}take it from the world seed\u{201D}.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             .padding(.top, 2)
         }
+    }
+
+    private func bodyEditor(_ index: Int) -> some View {
+        let body = composer.bodies[index]
+        return DisclosureGroup {
+            VStack(alignment: .leading, spacing: 4) {
+                row("size") {
+                    Slider(value: bindingFor(index, \.size), in: 0.3...2.5)
+                    Text(String(format: "%.1fx", body.size)).monospacedDigit().frame(width: 44)
+                }
+                row("hue") {
+                    Slider(value: bindingFor(index, \.hue), in: -1...359)
+                    Text(body.hue < 0 ? "seed" : "\(Int(body.hue))°").monospacedDigit().frame(width: 48)
+                }
+                row("shadow") {
+                    Picker("", selection: bindingFor(index, \.shadow)) {
+                        Text("seed").tag(0)
+                        ForEach(composer.palette?.shadows ?? [], id: \.self) { Text("\($0)").tag($0) }
+                    }.labelsHidden().frame(width: 110)
+                    Text("1 and 7 are the lit ones").font(.caption).foregroundStyle(.secondary)
+                }
+                row("position") {
+                    Slider(value: bindingFor(index, \.x), in: -1...1)
+                    Text(body.x < 0 ? "seed" : String(format: "x %.2f", body.x)).monospacedDigit()
+                        .frame(width: 60)
+                }
+                row("") {
+                    Slider(value: bindingFor(index, \.y), in: -1...1)
+                    Text(body.y < 0 ? "seed" : String(format: "y %.2f", body.y)).monospacedDigit()
+                        .frame(width: 60)
+                }
+                row("continents") {
+                    Button("re-roll") {
+                        composer.bodies[index].seed = Int.random(in: 1...9_999_999)
+                        composer.schedulePreview()
+                    }
+                    Text(body.seed > 0 ? "seed \(body.seed)" : "from the world seed")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Picker("", selection: bindingFor(index, \.type)) {
+                    ForEach(composer.worldChoices.filter { $0 != "none" }, id: \.self) { Text($0).tag($0) }
+                }.labelsHidden().frame(width: 130)
+                Text(body.isParent ? "planet you orbit" : "moon")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("✕") {
+                    composer.bodies.remove(at: index)
+                    if composer.bodies.isEmpty { composer.bodies = [Composer.Body()] }
+                    composer.schedulePreview()
+                }.buttonStyle(.borderless)
+            }
+        }
+    }
+
+    /// A binding into one field, so the Sliders and Pickers can stay declarative.
+    private func bindingFor<Value>(_ index: Int, _ path: WritableKeyPath<Composer.Body, Value>) -> Binding<Value> {
+        Binding(
+            get: { composer.bodies.indices.contains(index) ? composer.bodies[index][keyPath: path]
+                                                           : Composer.Body()[keyPath: path] },
+            set: { newValue in
+                guard composer.bodies.indices.contains(index) else { return }
+                composer.bodies[index][keyPath: path] = newValue
+                composer.schedulePreview()
+            })
     }
 
     private var exportBox: some View {

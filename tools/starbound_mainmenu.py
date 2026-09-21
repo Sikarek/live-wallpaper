@@ -713,6 +713,13 @@ def main():
     ap.add_argument("--from-plan", default="",
                     help="read a wallpaper folder's backdrop.json and use its values for anything not "
                          "given explicitly — regenerates the same scene with the current page code")
+    ap.add_argument("--bodies", default="",
+                    help="JSON list describing the sky bodies exactly, e.g. "
+                         "'[{\"type\":\"moon\",\"size\":1.2,\"hue\":210,\"shadow\":7,\"seed\":99,"
+                         "\"x\":0.3,\"y\":0.6}, {\"type\":\"gasgiant\",\"parent\":true,\"hue\":40}]'. "
+                         "Everything is optional: size scales the engine's own scale, hue is the biome/"
+                         "gas hue shift in degrees, shadow picks 1-9, seed re-rolls the continents, x/y "
+                         "place it in the sky. Overrides --moons/--moon-types/--parent-planet.")
     ap.add_argument("--dump-options", action="store_true",
                     help="print the palette of choices as JSON (the Composer app builds its pickers "
                          "from this, so the two can never drift apart) and exit")
@@ -797,13 +804,25 @@ def main():
     # ---- the sky's other bodies: the moons and (optionally) the planet we orbit ------------------
     rng = _random.Random(args.seed)
     orbiters = []
-    if args.parent_planet and args.parent_planet != "none":
+    body_specs = _json.loads(args.bodies) if args.bodies else None
+    if body_specs is not None:
+        for spec in body_specs:
+            name = spec.get("type", "moon")
+            if name != GAS_GIANT_TYPE and name not in DISC_BIOMES:
+                sys.exit(f"unknown body type {name!r}")
+            parent = bool(spec.get("parent"))
+            orbiters.append({"type": name, "parent": parent, "spec_hue": spec.get("hue"),
+                             "kind": "gas" if name == GAS_GIANT_TYPE else "disc",
+                             "scale": round((PARENT_SCALE if parent else MOON_SCALE)
+                                            * float(spec.get("size", 1.0)), 4),
+                             "spec": spec})
+    elif args.parent_planet and args.parent_planet != "none":
         if args.parent_planet not in SKY_TYPES:
             sys.exit(f"unknown --parent-planet {args.parent_planet!r}; pick one of: {', '.join(SKY_TYPES)}")
         orbiters.append({"type": args.parent_planet, "scale": round(PARENT_SCALE * args.planet_size, 4),
                          "parent": True, "kind": "gas" if args.parent_planet == GAS_GIANT_TYPE else "disc"})
     moon_types = [t.strip() for t in args.moon_types.split(",") if t.strip()]
-    for i in range(args.moons):
+    for i in range(0 if body_specs is not None else args.moons):
         t = moon_types[i] if i < len(moon_types) else rng.choice(DISC_BIOMES)
         if t not in DISC_BIOMES:
             sys.exit(f"unknown moon type {t!r}; pick one of: {', '.join(DISC_BIOMES)}")
@@ -811,20 +830,36 @@ def main():
                          "kind": "disc"})
     disc_sources = []          # (pak path, local path) pairs for the compositor's inputs
     for i, orbiter in enumerate(orbiters):
-        orbiter["x"] = round(rng.random(), 6)          # unit random x satellite.area, like the engine
-        orbiter["y"] = round(rng.random(), 6)
+        spec = orbiter.pop("spec", None) or {}
+        # EVERY body gets its own stream, derived from the world seed when none is given, and the seed is
+        # recorded. Drawing from the global stream instead made a reload land on different continent
+        # masks: the second export states x/y/shadow explicitly, so it consumed different draws.
+        body_seed = spec.get("seed")
+        if body_seed is None:
+            body_seed = (int(args.seed) ^ ((i + 1) * 0x9E3779B1)) & 0xFFFFFFFF
+        orbiter["seed"] = int(body_seed)
+        # One stream per concern. A single stream made the result depend on WHICH values were supplied:
+        # a reload states x/y/shadow explicitly, so it consumed fewer draws and the continent masks came
+        # out different — the scene changed just from saving and reloading it.
+        position_rng = _random.Random(int(body_seed) * 31 + 1)
+        shading_rng = _random.Random(int(body_seed) * 31 + 2)
+        detail_rng = _random.Random(int(body_seed) * 31 + 3)
+        body_rng = _random.Random(int(body_seed) * 31 + 4)      # gas-giant clouds
+        orbiter["x"] = round(float(spec["x"]) if spec.get("x") is not None else position_rng.random(), 6)
+        orbiter["y"] = round(float(spec["y"]) if spec.get("y") is not None else position_rng.random(), 6)
         orbiter["image"] = f"disc{i}.png"
-        orbiter["shadow"] = args.disc_shadow or rng.randint(1, SHADOW_NUMBERS)
+        orbiter["shadow"] = (int(spec["shadow"]) if spec.get("shadow") is not None
+                             else (args.disc_shadow or shading_rng.randint(1, SHADOW_NUMBERS)))
         stack = []
         if orbiter["kind"] == "gas":
             # the engine's GasGiant branch: base at a random hue, then each cloud overlay hue-shifted a
             # little further and clipped to its own dynamics mask, then the shadow sprite
-            hue = round(rng.uniform(0, 360), 2)
+            hue = round(float(spec["hue"]) if spec.get("hue") is not None else body_rng.uniform(0, 360), 2)
             orbiter["gas"] = {"hue": hue, "overlays": []}
             stack.append((f"{GAS_GIANT}/{GAS_BASE}", hue, None, None))
             for cloud in GAS_CLOUDS:
-                hue = round(hue + rng.uniform(*GAS_HUE_OFFSET), 2)
-                dynamics = rng.randint(*GAS_DYNAMICS_RANGE)
+                hue = round(hue + body_rng.uniform(*GAS_HUE_OFFSET), 2)
+                dynamics = body_rng.randint(*GAS_DYNAMICS_RANGE)
                 stack.append((f"{GAS_GIANT}/{cloud}", hue, f"{GAS_GIANT}/gas_giant_dynamics/{dynamics}.png",
                               dynamics))
                 orbiter["gas"]["overlays"].append({"image": cloud, "hue": hue, "dynamics": dynamics})
@@ -837,7 +872,7 @@ def main():
             chunk, low, high = DYNAMICS.get(orbiter["type"], DYNAMICS_DEFAULT)
             for n in range(BASE_COUNT.get(orbiter["type"], 3), 0, -1):
                 stack.append((f"{DISC_DIR}/{orbiter['type']}/maskie{n}.png", 0, None, None))
-                dynamics = rng.randint(low, high)
+                dynamics = detail_rng.randint(low, high)
                 stack.append((f"{DYNAMICS_DIR}/{chunk}/{dynamics}.png", 0, None, None))
                 orbiter.setdefault("layers", []).append({"maskie": n, "dynamics": dynamics, "chunk": chunk})
             orbiter["shadow_path"] = f"{DISC_SHADOW_DIR}/{orbiter['shadow']}.png"
@@ -969,6 +1004,10 @@ def main():
             # Clipping is what makes the landmasses: without it the darkest layer covers everything.
             base = os.path.join(inside, os.path.basename(orbiter["stack"][0][0]))
             size = png_size(os.path.join(assets, base))
+            # NOTE: read the hue off the orbiter, not off `spec` — that variable still holds the LAST
+            # body's spec after the building loop, which silently gave every disc the last body's hue
+            body_hue = orbiter.pop("spec_hue", None) or 0
+            orbiter["hue"] = float(body_hue) if body_hue else None
             out_png = os.path.join(assets, orbiter["image"])
             plates = []
             for layer in orbiter.get("layers", []):
@@ -984,7 +1023,10 @@ def main():
                 plates.append(clipped)
             # one canvas for the disc: the compositor always starts blank, so every layer has to be in
             # the same call — writing it incrementally just replaced the file with the last layer
-            final = [out_png, str(size[0]), str(size[1]), "--over", base]
+            final = [out_png, str(size[0]), str(size[1])]
+            if body_hue:
+                final += ["--hue", str(body_hue)]
+            final += ["--over", base]
             for plate in plates:
                 final += ["--over", plate]
             final += ["--over", os.path.join(inside, os.path.basename(orbiter["shadow_path"]))]
@@ -1042,13 +1084,16 @@ def main():
         "orbiters": [{"x": o["x"], "y": o["y"], "type": o["type"], "scale": o["scale"],
                       "image": o["image"], "kind": o.get("kind", "disc"),
                       "shadow": o.get("shadow"), "gas": o.get("gas"), "layers": o.get("layers"),
+                      "hue": (o.get("hue") if o.get("hue") is not None
+                              else (o.get("gas") or {}).get("hue")), "seed": o.get("seed"),
                       "parent": o.get("parent", False)} for o in orbiters],
     }
     with open(os.path.join(out, "backdrop.json"), "w") as g:
         _json.dump(plan, g, indent=2)
     print(f"# wallpaper written: {index}")
+    bodies_summary = ", ".join(f"{o['type']}{'(parent)' if o.get('parent') else ''}" for o in orbiters) or "none"
     print(f"# planet={args.planet} masks={masks} dayLength={args.day_length}s stars/cell={args.stars_per_cell} "
-          f"moons={args.moons} parent={args.parent_planet}")
+          f"bodies=[{bodies_summary}]")
 
 
 if __name__ == "__main__":

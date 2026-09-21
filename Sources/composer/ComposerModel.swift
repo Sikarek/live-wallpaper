@@ -168,13 +168,22 @@ final class Composer: ObservableObject {
     @Published var fps = 30                     // canvas redraw rate cap; the clock keeps running
     @Published var dayLength = 600.0                   // seconds per in-game day
 
-    // the other bodies
-    @Published var moons = 0
-    @Published var moonTypes: [String] = ["moon", "barren", "tundra"]
-    @Published var parentPlanet = "none"
-    @Published var moonSize = 1.0
-    @Published var planetSize = 1.0
-    @Published var discShadow = 0                      // 0 = from the seed
+    // the other bodies. Each one carries everything the engine derives for it, so the continents, the
+    // shading, the hue and the placement can all be re-rolled individually.
+    struct Body: Identifiable, Equatable {
+        var id = UUID()
+        var type = "moon"
+        var isParent = false
+        var size = 1.0          // multiplier on the engine's own orbiter scale
+        var hue = -1.0          // degrees of hue shift; -1 = from the seed
+        var shadow = 0          // 1-9; 0 = from the seed
+        var seed = 0            // 0 = follow the world seed; set it to re-roll this body
+        var x = -1.0            // unit position in satellite.area; -1 = from the seed
+        var y = -1.0
+    }
+    @Published var bodies: [Body] = [
+        Body(type: "moon", size: 1.0, hue: -1, shadow: 0, seed: 0, x: -1, y: -1)
+    ]
 
     // identity / export
     @Published var seed = 1234567
@@ -231,12 +240,20 @@ final class Composer: ObservableObject {
         args += ["--day-length", String(Int(dayLength.rounded()))]   // whole seconds: the video must match
         args += ["--stars-per-cell", String(starsPerCell)]
         args += ["--fps", String(fps)]
-        args += ["--moons", String(moons)]
-        args += ["--moon-types", Array(moonTypes.prefix(moons)).joined(separator: ",")]
-        args += ["--parent-planet", parentPlanet]
-        args += ["--moon-size", String(format: "%.2f", moonSize)]
-        args += ["--planet-size", String(format: "%.2f", planetSize)]
-        args += ["--disc-shadow", String(discShadow)]
+        var specs: [[String: Any]] = []
+        for body in bodies {
+            var spec: [String: Any] = ["type": body.type, "size": body.size, "parent": body.isParent]
+            if body.hue >= 0 { spec["hue"] = body.hue }
+            if body.shadow > 0 { spec["shadow"] = body.shadow }
+            if body.seed > 0 { spec["seed"] = body.seed }
+            if body.x >= 0 { spec["x"] = body.x }
+            if body.y >= 0 { spec["y"] = body.y }
+            specs.append(spec)
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: specs),
+           let text = String(data: data, encoding: .utf8) {
+            args += ["--bodies", text]
+        }
         return args
     }
 
@@ -246,9 +263,9 @@ final class Composer: ObservableObject {
     var signature: String {
         [planet, liquid, masks.map(String.init).joined(separator: ","), String(format: "%.3f", maskAlpha),
          String(format: "%.1f", hueShift), String(format: "%.2f", cloudAlpha), String(starsPerCell),
-         String(format: "%.1f", dayLength), String(moons), Array(moonTypes.prefix(moons)).joined(separator: ","),
-         parentPlanet, String(format: "%.2f", moonSize), String(format: "%.2f", planetSize),
-         String(discShadow), String(fps), String(seed)].joined(separator: "|")
+         String(format: "%.1f", dayLength), String(fps), String(seed),
+         bodies.map { "\($0.type)\($0.isParent)\($0.size)\($0.hue)\($0.shadow)\($0.seed)\($0.x)\($0.y)" }
+            .joined(separator: ",")].joined(separator: "|")
     }
 
     private var pendingPreview: DispatchWorkItem?
@@ -344,12 +361,26 @@ final class Composer: ObservableObject {
         let count = Int.random(in: low...max(low, high))
         masks = (0..<3).map { $0 < count ? Int.random(in: 1...25) : 0 }
         hueShift = Double(Int.random(in: -180...180))
-        moons = Int.random(in: 0...3)
-        parentPlanet = Bool.random() ? "none" : (palette.planets.randomElement() ?? "none")
-        moonTypes = (0..<3).map { _ in palette.planets.randomElement() ?? "moon" }
-        moonSize = Double.random(in: 0.7...1.8)
-        planetSize = Double.random(in: 0.7...1.6)
-        discShadow = Int.random(in: 0...9)
+        var rolled: [Body] = []
+        for _ in 0..<Int.random(in: 0...3) {
+            var body = Body()
+            body.type = palette.planets.randomElement() ?? "moon"
+            body.size = Double.random(in: 0.7...1.8)
+            body.hue = Bool.random() ? Double(Int.random(in: 0...359)) : -1
+            body.shadow = Int.random(in: 0...9)
+            body.seed = Int.random(in: 1...9_999_999)
+            rolled.append(body)
+        }
+        if Bool.random(), let planet = palette.planets.randomElement() {
+            var parent = Body()
+            parent.type = Bool.random() ? "gasgiant" : planet
+            parent.isParent = true
+            parent.size = Double.random(in: 0.7...1.6)
+            parent.hue = Bool.random() ? Double(Int.random(in: 0...359)) : -1
+            parent.seed = Int.random(in: 1...9_999_999)
+            rolled.append(parent)
+        }
+        bodies = rolled.isEmpty ? [Body()] : rolled
         cloudAlpha = Double.random(in: 1.5...4.5)
         fps = Int.random(in: 1...2) == 1 ? 30 : 20
         refreshPreview()
@@ -373,7 +404,16 @@ final class Composer: ObservableObject {
     }
 
     struct SavedPlan: Decodable {
-        struct Orbiter: Decodable { let type: String; let parent: Bool? }
+        struct Orbiter: Decodable {
+            let type: String
+            let parent: Bool?
+            let size: Double?
+            let hue: Double?
+            let shadow: Int?
+            let seed: Int?
+            let x: Double?
+            let y: Double?
+        }
         let planet: String
         let masks: [FlexibleInt]?
         let maskAlpha: Double?
@@ -419,14 +459,20 @@ final class Composer: ObservableObject {
         if let value = plan.fps { fps = value }
         if let value = plan.dayLength { dayLength = value.rounded() }
         if let value = plan.seed { seed = value }
-        if let value = plan.moonSize { moonSize = value }
-        if let value = plan.planetSize { planetSize = value }
-        if let value = plan.discShadow { discShadow = value }
-        let bodies = plan.orbiters ?? []
-        let moons = bodies.filter { ($0.parent ?? false) == false }
-        self.moons = min(3, moons.count)
-        moonTypes = (0..<3).map { index in index < moons.count ? moons[index].type : "moon" }
-        parentPlanet = bodies.first { ($0.parent ?? false) == true }?.type ?? "none"
+        let restored = plan.orbiters ?? []
+        bodies = restored.map { orbiter in
+            var body = Body()
+            body.type = orbiter.type
+            body.isParent = orbiter.parent ?? false
+            body.size = orbiter.size ?? 1.0
+            body.hue = orbiter.hue ?? -1
+            body.shadow = orbiter.shadow ?? 0
+            body.seed = orbiter.seed ?? 0
+            body.x = orbiter.x ?? -1
+            body.y = orbiter.y ?? -1
+            return body
+        }
+        if bodies.isEmpty { bodies = [Body()] }
         status = "loaded \u{201C}\(folder.lastPathComponent)\u{201D} — change what you like and export a copy"
         refreshPreview()
     }
@@ -446,7 +492,7 @@ final class Composer: ObservableObject {
             starsPerCell = defaults.starsPerCell
         }
         liquid = "none"; hueShift = 0
-        moons = 0; parentPlanet = "none"; moonSize = 1; planetSize = 1; discShadow = 0
+        bodies = [Body()]
     }
 
     // MARK: - export into the LiveWallpaper app
